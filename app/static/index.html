@@ -169,6 +169,7 @@
       <div><p class="eyebrow">知识图谱</p><h2>从关联中找到下一步</h2><span class="graph-hint" id="graph-scope-summary">正在整理知识关联…</span></div>
     </div>
     <div class="graph-toolbar-actions">
+      <button id="btn-graph-back" class="btn btn-quiet" type="button">返回学习界面</button>
       <div class="graph-legend" aria-label="阅读状态图例">
         <span class="lg-item"><span class="dot unread"></span>未读</span>
         <span class="lg-item"><span class="dot reading"></span>在读</span>
@@ -214,6 +215,7 @@
       <section class="settings-section">
         <h3>图谱力度</h3>
         <label class="range-row">向心力 <output id="graph-center-force-value">0.012</output><input id="graph-center-force" type="range" min="0.003" max="0.04" step="0.001" value="0.012"></label>
+        <p class="settings-help">调整后会立即重新计算未固定节点，手动拖动固定的节点保持原位。</p>
         <button id="btn-reheat-graph" class="btn btn-quiet full-width" type="button">重新排列未固定节点</button>
         <button id="btn-clear-graph-layout" class="text-btn full-width graph-reset-layout" type="button">清除手动布局</button>
       </section>

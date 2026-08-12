@@ -98,6 +98,12 @@ def test_graph_node_drag_persists_and_can_be_cleared(wiki):
         assert page.locator(".graph-node").count() == 7
         # 初始力导向布局短暂移动，等待稳定后再按住圆心拖动。
         page.wait_for_timeout(1200)
+        initial_transform = page.locator(".graph-node").first.get_attribute("transform")
+        page.get_by_role("button", name="图谱设置").click()
+        page.locator("#graph-center-force").fill("0.04")
+        page.wait_for_function(
+            f"document.querySelector('.graph-node')?.getAttribute('transform') !== {initial_transform!r}"
+        )
         circle = page.locator(".graph-node circle").first
         box = circle.bounding_box()
         assert box is not None
@@ -113,4 +119,6 @@ def test_graph_node_drag_persists_and_can_be_cleared(wiki):
         page.get_by_role("button", name="图谱设置").click()
         page.get_by_role("button", name="清除手动布局").click()
         assert page.locator(".graph-pin").count() == 0
+        page.get_by_role("button", name="返回学习界面").click()
+        assert page.locator("#layout-main").is_visible()
         browser.close()

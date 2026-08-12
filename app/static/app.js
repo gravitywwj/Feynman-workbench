@@ -843,8 +843,8 @@ function reheatGraph() {
   if (!G.nodes.length) return;
   G.nodes.forEach((node, index) => {
     if (node.pinned) return;
-    node.vx = Math.cos(index * 1.7) * 1.2;
-    node.vy = Math.sin(index * 1.7) * 1.2;
+    node.vx = Math.cos(index * 1.7) * 0.72;
+    node.vy = Math.sin(index * 1.7) * 0.72;
   });
   if (!G.running) { G.running = true; requestAnimationFrame(tick); }
 }
@@ -853,14 +853,14 @@ function tick() {
   if (!G.running || !G.group) return;
   const n = G.nodes.length;
   if (!n) { G.running = false; return; }
-  const C_REP = 5000, C_SPR = 0.045, REST = 100, DAMP = 0.82, MAXV = 6;
+  const C_REP = 3400, C_SPR = 0.035, REST = 112, DAMP = 0.9, MAXV = 3.8;
   for (let i = 0; i < n; i++) {
     const a = G.nodes[i];
     for (let j = i + 1; j < n; j++) {
       const b = G.nodes[j];
       const dx = a.x - b.x, dy = a.y - b.y;
-      const d2 = Math.max(dx * dx + dy * dy, 400);
-      const d = Math.sqrt(d2), force = Math.min(C_REP / d2, 25);
+      const d2 = Math.max(dx * dx + dy * dy, 625);
+      const d = Math.sqrt(d2), force = Math.min(C_REP / d2, 11);
       const fx = (dx / d) * force, fy = (dy / d) * force;
       a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
     }
@@ -874,17 +874,17 @@ function tick() {
   let energy = 0;
   for (const node of G.nodes) {
     if (G.drag?.id === node.id || node.pinned) continue;
-    node.vx += (G.W / 2 - node.x) * graphSettings.centerForce;
-    node.vy += (G.H / 2 - node.y) * graphSettings.centerForce;
+    node.vx += (G.W / 2 - node.x) * graphSettings.centerForce * 0.42;
+    node.vy += (G.H / 2 - node.y) * graphSettings.centerForce * 0.42;
     node.vx *= DAMP; node.vy *= DAMP;
     const speed = Math.hypot(node.vx, node.vy);
     if (speed > MAXV) { node.vx *= MAXV / speed; node.vy *= MAXV / speed; }
     node.x += node.vx; node.y += node.vy;
     energy += speed;
-    if (node.x < 20) { node.x = 20; node.vx = -node.vx * 0.3; }
-    if (node.x > G.W - 20) { node.x = G.W - 20; node.vx = -node.vx * 0.3; }
-    if (node.y < 20) { node.y = 20; node.vy = -node.vy * 0.3; }
-    if (node.y > G.H - 20) { node.y = G.H - 20; node.vy = -node.vy * 0.3; }
+    if (node.x < 20) { node.x = 20; node.vx *= 0.25; }
+    if (node.x > G.W - 20) { node.x = G.W - 20; node.vx *= 0.25; }
+    if (node.y < 20) { node.y = 20; node.vy *= 0.25; }
+    if (node.y > G.H - 20) { node.y = G.H - 20; node.vy *= 0.25; }
   }
   const links = G.group.querySelectorAll('.graph-link');
   G.links.forEach((link, index) => {
@@ -893,7 +893,7 @@ function tick() {
   });
   const nodes = G.group.querySelectorAll('.graph-node');
   G.nodes.forEach((node, index) => nodes[index].setAttribute('transform', `translate(${node.x},${node.y})`));
-  if (!G.drag && energy < n * 0.03) { G.running = false; return; }
+  if (!G.drag && energy < n * 0.018) { G.running = false; return; }
   requestAnimationFrame(tick);
 }
 
@@ -1239,10 +1239,12 @@ for (const [id, key, digits, redraw] of [
     document.getElementById(`${id}-value`).textContent = graphSettings[key].toFixed(digits);
     saveGraphSettings();
     if (redraw) renderGraph();
+    if (key === 'centerForce') reheatGraph();
   });
 }
 document.getElementById('btn-reheat-graph').addEventListener('click', reheatGraph);
 document.getElementById('btn-clear-graph-layout').addEventListener('click', clearGraphLayout);
+document.getElementById('btn-graph-back').addEventListener('click', () => switchView(false));
 document.getElementById('btn-graph-fit').addEventListener('click', fitGraphToView);
 document.getElementById('btn-graph-focus-current').addEventListener('click', () => {
   if (!state.selected || !focusGraphNode(state.selected.path)) {
