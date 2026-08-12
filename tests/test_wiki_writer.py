@@ -74,7 +74,7 @@ class TestBuildGraph:
         g = wiki_reader.build_graph()
         ids = {n["id"] for n in g["nodes"]}
         assert "AI/rag/query-rewriting.md" in ids
-        assert len(g["nodes"]) == 4
+        assert len(g["nodes"]) == 5
         # query-rewriting → rag-from-scratch（存在）；→ 不存在的页面被丢弃
         link_set = {(l["source"], l["target"]) for l in g["links"]}
         assert ("AI/rag/query-rewriting.md", "AI/rag/rag-from-scratch.md") in link_set

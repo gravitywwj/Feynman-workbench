@@ -10,8 +10,8 @@ def test_list_concepts(wiki):
     r = client.get("/api/concepts")
     assert r.status_code == 200
     data = r.json()
-    assert data["total"] == 4
-    assert data["sections"] == {"AI": 3, "Financing": 1}
+    assert data["total"] == 5
+    assert data["sections"] == {"AI": 3, "Financing": 2}
     titles = {c["title"] for c in data["concepts"]}
     assert "Query Rewriting 查询改写" in titles
 
@@ -19,8 +19,11 @@ def test_list_concepts(wiki):
 def test_list_filter_section(wiki):
     r = client.get("/api/concepts", params={"section": "Financing"})
     data = r.json()
-    assert data["total"] == 1
-    assert data["concepts"][0]["section"] == "Financing"
+    assert data["total"] == 2
+    assert {c["path"] for c in data["concepts"]} == {
+        "Financing/cashflow/budget-and-savings.md",
+        "Financing/investing/investment-basics.md",
+    }
 
 
 def test_list_search(wiki):
@@ -52,7 +55,7 @@ def test_get_graph(wiki):
     r = client.get("/api/concepts/graph")
     assert r.status_code == 200
     data = r.json()
-    assert len(data["nodes"]) == 4
+    assert len(data["nodes"]) == 5
     assert any(l["source"].endswith("query-rewriting.md") and l["target"].endswith("rag-from-scratch.md")
                for l in data["links"])
 

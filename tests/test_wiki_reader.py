@@ -46,6 +46,11 @@ class TestScanConcepts:
         concepts = wiki_reader.scan_concepts()
         sections = {c["section"] for c in concepts}
         assert sections == {"AI", "Financing"}
+        finance_paths = {c["path"] for c in concepts if c["section"] == "Financing"}
+        assert finance_paths == {
+            "Financing/cashflow/budget-and-savings.md",
+            "Financing/investing/investment-basics.md",
+        }
 
 
 class TestRenderPage:

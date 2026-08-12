@@ -66,12 +66,16 @@ def wiki(tmp_path, monkeypatch):
     pages = tmp_path / "pages"
     (pages / "AI" / "rag").mkdir(parents=True)
     (pages / "AI" / "agents").mkdir(parents=True)
-    (pages / "Financing").mkdir(parents=True)
+    (pages / "Financing" / "cashflow").mkdir(parents=True)
+    (pages / "Financing" / "investing").mkdir(parents=True)
     (pages / "AI" / "rag" / "query-rewriting.md").write_text(PAGE_QR, encoding="utf-8")
     (pages / "AI" / "rag" / "rag-from-scratch.md").write_text(PAGE_RFS, encoding="utf-8")
     (pages / "AI" / "agents" / "agent-memory-system.md").write_text(PAGE_MEM, encoding="utf-8")
-    (pages / "Financing" / "budget-and-savings.md").write_text(
+    (pages / "Financing" / "cashflow" / "budget-and-savings.md").write_text(
         "---\ntitle: 预算与储蓄\ncreated: 2026-08-01\nupdated: 2026-08-02\ntype: concept\nstatus: reading\ntags: [finance]\n---\n\n# 预算与储蓄\n\n理财基础。\n", encoding="utf-8"
+    )
+    (pages / "Financing" / "investing" / "investment-basics.md").write_text(
+        "---\ntitle: 投资基础\ncreated: 2026-08-01\nupdated: 2026-08-02\ntype: concept\nstatus: unread\ntags: [finance]\n---\n\n# 投资基础\n\n长期投资基础。\n", encoding="utf-8"
     )
     (pages / "dashboard.md").write_text(DASHBOARD, encoding="utf-8")
     monkeypatch.setenv("FEYNMAN_WIKI_PATH", str(tmp_path))

@@ -41,7 +41,8 @@ async function loadConcepts() {
     state.concepts = data.concepts;
     for (const c of data.concepts) {
       const parts = c.path.split('/');
-      for (let i = 1; i < parts.length - 1; i++) state.expanded.add(parts.slice(0, i).join('/'));
+      // 展开所有真实目录层级（例如 Financing/cashflow），而非只展开一级分区。
+      for (let i = 1; i < parts.length; i++) state.expanded.add(parts.slice(0, i).join('/'));
     }
     document.getElementById('concept-count').textContent = data.total + ' 页';
     renderTree();
@@ -60,13 +61,14 @@ function impStars(imp) {
 
 /* 构建树：{ name, children: Map, pages: [] } */
 function buildTree() {
-  const root = { name: '', children: new Map(), pages: [] };
+  const root = { name: '', path: '', children: new Map(), pages: [] };
   for (const c of state.concepts) {
     const parts = c.path.split('/');
     let node = root;
     for (let i = 0; i < parts.length - 1; i++) {
+      const path = parts.slice(0, i + 1).join('/');
       if (!node.children.has(parts[i])) {
-        node.children.set(parts[i], { name: parts[i], children: new Map(), pages: [] });
+        node.children.set(parts[i], { name: parts[i], path, children: new Map(), pages: [] });
       }
       node = node.children.get(parts[i]);
     }
@@ -110,7 +112,7 @@ function renderTree() {
 function renderDir(nodes) {
   let html = '';
   for (const node of nodes) {
-    const path = nodePath(node);
+    const path = node.path;
     const isOpen = state.expanded.has(path);
     const subDirs = [...node.children.values()].sort(dirSort);
     const pages = [...node.pages].sort((a, b) => a.title.localeCompare(b.title, 'zh-Hans-CN'));
@@ -139,18 +141,6 @@ function renderChildren(subDirs, pages) {
       </div>`;
   }
   return html;
-}
-
-function nodePath(node) {
-  const find = (n, prefix) => {
-    if (n === node) return prefix;
-    for (const [name, child] of n.children) {
-      const p = find(child, prefix ? prefix + '/' + name : name);
-      if (p !== null) return p;
-    }
-    return null;
-  };
-  return find(treeRoot, '');
 }
 
 function bindTreeEvents(wrap) {
