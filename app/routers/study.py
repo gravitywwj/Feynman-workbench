@@ -4,7 +4,6 @@ from pydantic import BaseModel, Field
 
 from app.services import study_sessions
 
-
 router = APIRouter(prefix="/api/study", tags=["study"])
 
 
@@ -19,6 +18,15 @@ class NoteSave(BaseModel):
 
 class ReviewCreate(BaseModel):
     rating: str
+
+
+class GapRevision(BaseModel):
+    revision: str = Field(min_length=1, max_length=10000)
+
+
+class PageRelink(BaseModel):
+    old_path: str
+    new_path: str
 
 
 @router.post("/sessions")
@@ -66,4 +74,46 @@ def submit_review(card_id: int, payload: ReviewCreate) -> dict:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/history")
+def history(limit: int = Query(20, ge=1, le=100), page_path: str | None = Query(None)) -> dict:
+    return {"sessions": study_sessions.list_history(limit, page_path)}
+
+
+@router.get("/gaps")
+def gaps(limit: int = Query(50, ge=1, le=100), status: str | None = Query(None)) -> dict:
+    if status and status not in {"open", "revised", "verified"}:
+        raise HTTPException(status_code=400, detail="不支持的盲区状态")
+    return {"gaps": study_sessions.list_gaps(limit, status)}
+
+
+@router.post("/gaps/{gap_id}/revision")
+def revise_gap(gap_id: int, payload: GapRevision) -> dict:
+    try:
+        return study_sessions.revise_gap(gap_id, payload.revision)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/export")
+def export_learning_data() -> dict:
+    return study_sessions.export_learning_data()
+
+
+@router.get("/orphans")
+def orphaned_records() -> dict:
+    return {"orphans": study_sessions.list_orphaned_records()}
+
+
+@router.post("/relink")
+def relink_page(payload: PageRelink) -> dict:
+    try:
+        return study_sessions.relink_page(payload.old_path, payload.new_path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except (LookupError, FileNotFoundError) as e:
         raise HTTPException(status_code=404, detail=str(e))

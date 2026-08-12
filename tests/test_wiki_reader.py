@@ -50,6 +50,7 @@ class TestScanConcepts:
         assert finance_paths == {
             "Financing/cashflow/budget-and-savings.md",
             "Financing/investing/investment-basics.md",
+            "Financing/references/shared-note.md",
         }
 
 
@@ -69,6 +70,28 @@ class TestRenderPage:
             assert False, "应抛 FileNotFoundError"
         except FileNotFoundError:
             pass
+
+    def test_sanitizes_unsafe_html(self, wiki):
+        page = wiki / "pages" / "AI" / "rag" / "unsafe.md"
+        page.write_text("# Safe\n\n<script>alert(1)</script><img src=x onerror=alert(1)>", encoding="utf-8")
+        _, html = wiki_reader.render_page_html("AI/rag/unsafe.md")
+        assert "<script" not in html
+        assert "onerror" not in html
+
+    def test_wikilinks_require_explicit_path_when_names_collide(self, wiki):
+        page = wiki / "pages" / "AI" / "rag" / "links.md"
+        page.write_text("[[shared-note]] and [[Financing/references/shared-note]]", encoding="utf-8")
+        _, html = wiki_reader.render_page_html("AI/rag/links.md")
+        assert 'wl-missing" data-target="shared-note"' in html
+        assert 'wl-ok" data-target="Financing/references/shared-note" data-path="Financing/references/shared-note.md"' in html
+
+    def test_graph_uses_explicit_path_when_names_collide(self, wiki):
+        page = wiki / "pages" / "AI" / "rag" / "links.md"
+        page.write_text("[[shared-note]] and [[Financing/references/shared-note]]", encoding="utf-8")
+        graph = wiki_reader.build_graph()
+        assert ("AI/rag/links.md", "Financing/references/shared-note.md") in {
+            (link["source"], link["target"]) for link in graph["links"]
+        }
 
 
 class TestSlugify:

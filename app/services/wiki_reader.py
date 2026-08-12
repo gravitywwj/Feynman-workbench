@@ -1,8 +1,10 @@
 """费曼学习工作台 — Wiki 读取层（对 D:\\LLM wiki 只读，绝不写入）"""
+import html
 import re
 import unicodedata
 from pathlib import Path
 
+import bleach
 import markdown as md
 
 from app.config import get_wiki_path
@@ -73,12 +75,43 @@ def scan_concepts() -> list[dict]:
     return concepts
 
 
-def _link_target_exists(target: str, wiki: Path) -> bool:
-    """wikilink 目标按 basename 匹配（与 Obsidian 规则一致）。"""
-    for f in (wiki / "pages").rglob("*.md"):
-        if f.stem == target:
-            return True
-    return False
+SAFE_TAGS = {
+    "a", "blockquote", "br", "code", "del", "em", "h1", "h2", "h3", "h4", "h5", "h6",
+    "hr", "img", "li", "ol", "p", "pre", "span", "strong", "table", "tbody", "td", "th",
+    "thead", "tr", "ul",
+}
+SAFE_ATTRIBUTES = {
+    "a": ["href", "title"],
+    "img": ["src", "alt", "title"],
+    "span": ["class", "data-path", "data-target"],
+    "code": ["class"],
+}
+
+
+def _wikilink_index(concepts: list[dict]) -> tuple[dict[str, str], dict[str, list[str]]]:
+    """建立精确路径和文件名索引，文件名重名时保留全部候选。"""
+    by_path: dict[str, str] = {}
+    by_stem: dict[str, list[str]] = {}
+    for concept in concepts:
+        path = concept["path"]
+        by_path[path.removesuffix(".md")] = path
+        stem = Path(path).stem
+        by_stem.setdefault(stem, []).append(path)
+    return by_path, by_stem
+
+
+def _resolve_wikilink(target: str, by_path: dict[str, str], by_stem: dict[str, list[str]]) -> str | None:
+    normalized = target.strip().replace("\\", "/").removesuffix(".md")
+    if normalized in by_path:
+        return by_path[normalized]
+    candidates = by_stem.get(Path(normalized).name, [])
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def resolve_wikilink(target: str, concepts: list[dict]) -> str | None:
+    """解析 wikilink：优先精确相对路径；仅有唯一同名文件时才按文件名跳转。"""
+    by_path, by_stem = _wikilink_index(concepts)
+    return _resolve_wikilink(target, by_path, by_stem)
 
 
 def extract_wikilinks(body: str) -> list[str]:
@@ -103,9 +136,7 @@ def build_graph() -> dict:
     if not pages_dir.is_dir():
         return {"nodes": [], "links": []}
     concepts = scan_concepts()
-    by_stem: dict[str, str] = {}
-    for c in concepts:
-        by_stem[c["path"].rsplit("/", 1)[-1][:-3]] = c["path"]
+    by_path, by_stem = _wikilink_index(concepts)
     links: set[tuple[str, str]] = set()
     for c in concepts:
         f = pages_dir / c["path"]
@@ -114,7 +145,7 @@ def build_graph() -> dict:
         except OSError:
             continue
         for target in extract_wikilinks(body):
-            t_path = by_stem.get(target)
+            t_path = _resolve_wikilink(target, by_path, by_stem)
             if not t_path or t_path == c["path"]:
                 continue
             pair = tuple(sorted((c["path"], t_path)))
@@ -141,15 +172,26 @@ def render_page_html(path: str) -> tuple[dict, str]:
     text = f.read_text(encoding="utf-8")
     meta, body = parse_frontmatter(text)
 
+    concepts = scan_concepts()
+    by_path, by_stem = _wikilink_index(concepts)
+
     def repl(m: re.Match) -> str:
         target, label = m.group(1), m.group(2)
         label = label or target
-        cls = "wl-ok" if _link_target_exists(target, wiki) else "wl-missing"
-        return f'<span class="wikilink {cls}" data-target="{target}">{label}</span>'
+        resolved_path = _resolve_wikilink(target, by_path, by_stem)
+        cls = "wl-ok" if resolved_path else "wl-missing"
+        data_path = f' data-path="{html.escape(resolved_path, quote=True)}"' if resolved_path else ""
+        return (
+            f'<span class="wikilink {cls}" data-target="{html.escape(target, quote=True)}"{data_path}>'
+            f'{html.escape(label)}</span>'
+        )
 
     body_html = WIKILINK_RE.sub(repl, body)
-    html = md.markdown(body_html, extensions=["fenced_code", "tables", "sane_lists"])
-    return meta, html
+    rendered = md.markdown(body_html, extensions=["fenced_code", "tables", "sane_lists"])
+    sanitized_html = bleach.clean(
+        rendered, tags=SAFE_TAGS, attributes=SAFE_ATTRIBUTES, protocols=["http", "https", "mailto"]
+    )
+    return meta, sanitized_html
 
 
 def display_size(line_count: int) -> str:

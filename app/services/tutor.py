@@ -49,6 +49,16 @@ def _normalize_gaps(raw_gaps: object) -> list[dict]:
     return normalized
 
 
+def _call_llm(config: dict, messages: list[dict]) -> str:
+    from openai import OpenAI
+
+    client = OpenAI(api_key=config["api_key"], base_url=config["base_url"], timeout=20)
+    response = client.chat.completions.create(
+        model=config["model"], temperature=0.2, max_tokens=900, messages=messages,
+    )
+    return response.choices[0].message.content or "{}"
+
+
 def diagnose(explanation: str, title: str, reference_html: str) -> tuple[list[dict], str, str]:
     """返回 (盲区, 下一问, 来源)，模型异常时不影响学习流程。"""
     config = get_llm_config()
@@ -56,18 +66,11 @@ def diagnose(explanation: str, title: str, reference_html: str) -> tuple[list[di
         gaps, question = local_diagnosis(explanation, title)
         return gaps, question, "local"
     try:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=config["api_key"], base_url=config["base_url"])
-        response = client.chat.completions.create(
-            model=config["model"],
-            temperature=0.2,
-            messages=[
+        content = _call_llm(config, [
                 {"role": "system", "content": "你是费曼学习教练。只依据参考资料检查学习者讲解，不要编造事实。返回纯 JSON：{\"gaps\":[{\"gap_type\":\"missing|wrong|vague\",\"content\":\"简洁、可行动的中文反馈\"}],\"question\":\"一个下一步追问\"}。盲区最多 3 条。"},
                 {"role": "user", "content": f"知识点：{title}\n\n参考资料：\n{reference_html[:12000]}\n\n学习者讲解：\n{explanation[:10000]}"},
-            ],
-        )
-        payload = _clean_json(response.choices[0].message.content or "{}")
+            ])
+        payload = _clean_json(content)
         gaps = _normalize_gaps(payload.get("gaps"))
         question = str(payload.get("question", "")).strip()[:500]
         if not question:
@@ -76,3 +79,23 @@ def diagnose(explanation: str, title: str, reference_html: str) -> tuple[list[di
     except Exception:
         gaps, question = local_diagnosis(explanation, title)
         return gaps, question, "local"
+
+
+def assess_gap_revision(revision: str, gap_content: str, title: str, reference_html: str) -> tuple[str, str, str]:
+    """核对用户对单个盲区的补充。离线模式只记录为已补充，避免伪造“已验证”。"""
+    config = get_llm_config()
+    if not config["api_key"]:
+        return "revised", "补充已保存。配置学习助手后，可依据参考资料进一步核对是否已澄清。", "local"
+    try:
+        content = _call_llm(config, [
+            {"role": "system", "content": "你是费曼学习教练。只依据参考资料核对学习者对一个盲区的补充。返回纯 JSON：{\"status\":\"verified|revised\",\"feedback\":\"简短中文反馈\"}。只有补充准确且真正回应盲区时才用 verified。"},
+            {"role": "user", "content": f"知识点：{title}\n\n参考资料：\n{reference_html[:12000]}\n\n原盲区：{gap_content}\n\n学习者补充：{revision[:10000]}"},
+        ])
+        payload = _clean_json(content)
+        status = str(payload.get("status", "revised")).strip()
+        feedback = str(payload.get("feedback", "补充已保存，建议在下一次回顾中再次验证。")).strip()[:500]
+        if status not in {"verified", "revised"}:
+            status = "revised"
+        return status, feedback or "补充已保存，建议在下一次回顾中再次验证。", "llm"
+    except Exception:
+        return "revised", "补充已保存。学习助手暂不可用，建议在下一次回顾中再次验证。", "local"

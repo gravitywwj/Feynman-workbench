@@ -45,6 +45,26 @@ tags: [agent]
 记忆系统与 [[query-rewriting]] 有关。
 """
 
+PAGE_SAME_NAME_AI = """---
+title: Shared Note AI
+status: unread
+---
+
+# Shared Note AI
+
+AI version.
+"""
+
+PAGE_SAME_NAME_FINANCE = """---
+title: Shared Note Finance
+status: unread
+---
+
+# Shared Note Finance
+
+Finance version.
+"""
+
 DASHBOARD = """---
 title: Wiki Dashboard
 created: 2026-08-03
@@ -68,9 +88,13 @@ def wiki(tmp_path, monkeypatch):
     (pages / "AI" / "agents").mkdir(parents=True)
     (pages / "Financing" / "cashflow").mkdir(parents=True)
     (pages / "Financing" / "investing").mkdir(parents=True)
+    (pages / "AI" / "references").mkdir(parents=True)
+    (pages / "Financing" / "references").mkdir(parents=True)
     (pages / "AI" / "rag" / "query-rewriting.md").write_text(PAGE_QR, encoding="utf-8")
     (pages / "AI" / "rag" / "rag-from-scratch.md").write_text(PAGE_RFS, encoding="utf-8")
     (pages / "AI" / "agents" / "agent-memory-system.md").write_text(PAGE_MEM, encoding="utf-8")
+    (pages / "AI" / "references" / "shared-note.md").write_text(PAGE_SAME_NAME_AI, encoding="utf-8")
+    (pages / "Financing" / "references" / "shared-note.md").write_text(PAGE_SAME_NAME_FINANCE, encoding="utf-8")
     (pages / "Financing" / "cashflow" / "budget-and-savings.md").write_text(
         "---\ntitle: 预算与储蓄\ncreated: 2026-08-01\nupdated: 2026-08-02\ntype: concept\nstatus: reading\ntags: [finance]\n---\n\n# 预算与储蓄\n\n理财基础。\n", encoding="utf-8"
     )

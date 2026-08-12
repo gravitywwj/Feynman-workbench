@@ -1,5 +1,4 @@
 """wiki_writer（frontmatter 写回）单元测试"""
-import re
 
 from app.services import wiki_reader, wiki_writer
 
@@ -58,6 +57,13 @@ class TestUpdateFrontmatter:
         except FileNotFoundError:
             pass
 
+    def test_clear_importance_removes_field(self, wiki):
+        wiki_writer.update_frontmatter("AI/rag/query-rewriting.md", {"importance": "high"})
+        wiki_writer.update_frontmatter("AI/rag/query-rewriting.md", {"importance": ""})
+        text = (wiki / "pages" / "AI" / "rag" / "query-rewriting.md").read_text(encoding="utf-8")
+        meta, _ = wiki_reader.parse_frontmatter(text)
+        assert "importance" not in meta
+
 
 class TestExtractWikilinks:
     def test_plain_links(self):
@@ -74,9 +80,9 @@ class TestBuildGraph:
         g = wiki_reader.build_graph()
         ids = {n["id"] for n in g["nodes"]}
         assert "AI/rag/query-rewriting.md" in ids
-        assert len(g["nodes"]) == 5
+        assert len(g["nodes"]) == 7
         # query-rewriting → rag-from-scratch（存在）；→ 不存在的页面被丢弃
-        link_set = {(l["source"], l["target"]) for l in g["links"]}
+        link_set = {(link["source"], link["target"]) for link in g["links"]}
         assert ("AI/rag/query-rewriting.md", "AI/rag/rag-from-scratch.md") in link_set
         assert not any("不存在的页面" in a or "不存在的页面" in b for a, b in link_set)
         # agent-memory-system → query-rewriting

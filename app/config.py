@@ -3,8 +3,8 @@ import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
-DB_PATH = DATA_DIR / "feynman.db"
+DATA_DIR = Path(os.environ.get("FEYNMAN_DATA_DIR", BASE_DIR / "data"))
+DB_PATH = Path(os.environ.get("FEYNMAN_DB_PATH", DATA_DIR / "feynman.db"))
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 

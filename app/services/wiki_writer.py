@@ -10,7 +10,7 @@ from app.config import get_wiki_path
 
 ALLOWED_FIELDS = {"status", "importance"}
 STATUS_VALUES = {"unread", "reading", "read"}
-IMPORTANCE_VALUES = {"high", "medium", "low"}
+IMPORTANCE_VALUES = {"high", "medium", "low", ""}
 
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.S)
 
@@ -41,9 +41,14 @@ def update_frontmatter(path: str, updates: dict) -> dict:
     text = f.read_text(encoding="utf-8")
     m = FRONTMATTER_RE.match(text)
     if not m:
+        # 清除一个原本不存在的标记时，不凭空创建 frontmatter。
+        if all(value == "" for value in updates.values()):
+            return {"path": path, "updated": dict(updates)}
         # 无 frontmatter：在其顶部补一个最小 frontmatter（含更新字段）
         lines = ["---"]
         for field, value in updates.items():
+            if value == "":
+                continue
             lines.append(f"{field}: {value}")
         lines.append("---")
         new_text = "\n".join(lines) + "\n\n" + text
@@ -56,11 +61,14 @@ def update_frontmatter(path: str, updates: dict) -> dict:
             found = False
             for i, line in enumerate(head_lines):
                 if re.match(rf"^{re.escape(field)}\s*:", line):
-                    head_lines[i] = f"{field}: {value}"
+                    if value == "":
+                        head_lines.pop(i)
+                    else:
+                        head_lines[i] = f"{field}: {value}"
                     found = True
                     changed.add(field)
                     break
-            if not found:
+            if not found and value != "":
                 # 追加在 title 之后（若有），否则追加在末尾
                 insert_at = 1 if head_lines and head_lines[0].startswith("title:") else len(head_lines)
                 head_lines.insert(insert_at, f"{field}: {value}")

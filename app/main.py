@@ -1,5 +1,4 @@
 """费曼学习工作台 — FastAPI 入口"""
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse

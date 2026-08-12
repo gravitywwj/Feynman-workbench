@@ -9,6 +9,16 @@ const state = {
   searchMode: false,
 };
 
+const readingSettingsKey = 'feynman-reading-settings';
+const defaultReadingSettings = {
+  font: 'sans',
+  fontSize: 16,
+  lineHeight: 1.85,
+  width: 'comfortable',
+  theme: 'light',
+};
+let readingSettings = loadReadingSettings();
+
 /* ===== 工具 ===== */
 function esc(s) {
   const d = document.createElement('div');
@@ -204,7 +214,7 @@ async function selectConcept(path) {
     document.querySelectorAll('#page-body .wikilink.wl-ok').forEach(el => {
       el.addEventListener('click', () => {
         const t = el.dataset.target;
-        const found = state.concepts.find(c => c.title === t || c.path.endsWith('/' + t + '.md'));
+        const found = state.concepts.find(c => c.path === el.dataset.path);
         if (found) selectConcept(found.path);
       });
     });
@@ -219,6 +229,40 @@ function storageGet(key) {
 
 function storageSet(key, value) {
   try { localStorage.setItem(key, value); } catch (e) { console.warn('无法保存本地学习记录', e); }
+}
+
+function loadReadingSettings() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(readingSettingsKey) || '{}');
+    return { ...defaultReadingSettings, ...stored };
+  } catch {
+    return { ...defaultReadingSettings };
+  }
+}
+
+function saveReadingSettings() {
+  try { localStorage.setItem(readingSettingsKey, JSON.stringify(readingSettings)); } catch (e) { console.warn('无法保存阅读外观设置', e); }
+}
+
+function applyReadingSettings() {
+  const body = document.getElementById('page-body');
+  if (!body) return;
+  const dark = readingSettings.theme === 'dark';
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  body.dataset.font = readingSettings.font;
+  body.dataset.width = readingSettings.width;
+  body.style.setProperty('--reading-font-size', `${readingSettings.fontSize}px`);
+  body.style.setProperty('--reading-line-height', String(readingSettings.lineHeight));
+  document.getElementById('reading-font').value = readingSettings.font;
+  document.getElementById('reading-width').value = readingSettings.width;
+  document.getElementById('reading-font-size').value = readingSettings.fontSize;
+  document.getElementById('reading-line-height').value = readingSettings.lineHeight;
+  document.getElementById('reading-font-size-value').textContent = `${readingSettings.fontSize}px`;
+  document.getElementById('reading-line-height-value').textContent = readingSettings.lineHeight.toFixed(2);
+  const themeButton = document.getElementById('btn-theme-toggle');
+  themeButton.textContent = dark ? '日间阅读' : '夜间阅读';
+  themeButton.setAttribute('aria-pressed', String(dark));
+  themeButton.setAttribute('aria-label', dark ? '切换至日间阅读界面' : '切换至夜间阅读界面');
 }
 
 function noteKey(path) { return `feynman-note:${path}`; }
@@ -360,6 +404,136 @@ function closeRecall() {
   document.getElementById('recall-modal').classList.add('hidden');
 }
 
+let historyView = 'gaps';
+
+function gapStatusText(status) {
+  return { open: '待补充', revised: '已补充，待核对', verified: '已澄清' }[status] || status;
+}
+
+function historyEscape(value) {
+  return esc(value || '').replace(/\n/g, '<br>');
+}
+
+async function openHistory(view = 'gaps') {
+  historyView = view;
+  const modal = document.getElementById('history-modal');
+  modal.classList.remove('hidden');
+  document.querySelectorAll('.history-tab').forEach(tab => {
+    const active = tab.dataset.historyView === view;
+    tab.classList.toggle('active', active);
+    tab.setAttribute('aria-selected', String(active));
+  });
+  const hint = document.getElementById('history-hint');
+  const content = document.getElementById('history-content');
+  hint.textContent = '正在读取学习记录…';
+  content.innerHTML = '';
+  try {
+    if (view === 'sessions') {
+      const data = await api('/api/study/history?limit=30');
+      hint.textContent = data.sessions.length ? '每一轮讲解都会保留，可从待处理盲区继续学习。' : '还没有学习会话。完成一次回顾后，会在这里留下记录。';
+      content.innerHTML = data.sessions.map(session => `
+        <article class="history-item">
+          <div class="history-item-head"><span>${esc(session.page_title)}</span><small>${esc(session.created_at)}</small></div>
+          <p>${session.gap_total ? `识别 ${session.gap_total} 个待核对点，其中 ${session.open_gap_total} 个尚未补充。` : '本次讲解结构完整，建议下次用更短的话再复述一次。'}</p>
+        </article>`).join('') || '<p class="review-empty">暂无学习历史。</p>';
+      return;
+    }
+    const data = await api('/api/study/gaps?limit=50');
+    hint.textContent = data.gaps.length ? '补充你的理解后，系统会保存修订；已配置学习助手时会进一步依据资料核对。' : '目前没有待处理盲区。完成一次回顾后，识别出的盲区会在这里出现。';
+    content.innerHTML = data.gaps.map(gap => `
+      <article class="gap-item" data-gap-id="${gap.id}">
+        <div class="history-item-head"><span>${esc(gap.page_title)}</span><small class="gap-status ${esc(gap.status)}">${gapStatusText(gap.status)}</small></div>
+        <p class="gap-original">${historyEscape(gap.content)}</p>
+        ${gap.revision ? `<p class="gap-revision"><b>你的补充：</b>${historyEscape(gap.revision)}</p>` : ''}
+        ${gap.status === 'verified' ? '' : `<textarea class="gap-revision-input" maxlength="10000" placeholder="用自己的话补全这个问题：说明机制、原因或举一个例子。">${esc(gap.revision || '')}</textarea><div class="gap-actions"><span class="gap-feedback"></span><button class="btn btn-primary btn-save-gap" type="button">保存补充并核对</button></div>`}
+      </article>`).join('') || '<p class="review-empty">暂无待处理盲区。</p>';
+  } catch (e) {
+    hint.textContent = `暂时无法读取学习记录：${e.message}`;
+  }
+}
+
+async function saveGapRevision(item) {
+  const input = item.querySelector('.gap-revision-input');
+  const button = item.querySelector('.btn-save-gap');
+  const feedback = item.querySelector('.gap-feedback');
+  const revision = input.value.trim();
+  if (revision.length < 24) {
+    feedback.textContent = '请至少写 24 个字符，说明你如何补全这个问题。';
+    return;
+  }
+  button.disabled = true;
+  button.textContent = '正在保存…';
+  try {
+    const gap = await api(`/api/study/gaps/${item.dataset.gapId}/revision`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ revision }),
+    });
+    feedback.textContent = gap.feedback;
+    item.querySelector('.gap-status').textContent = gapStatusText(gap.status);
+    item.querySelector('.gap-status').className = `gap-status ${gap.status}`;
+    if (gap.status === 'verified') {
+      item.querySelector('.gap-actions').remove();
+      input.remove();
+    } else {
+      button.textContent = '再次保存补充';
+      button.disabled = false;
+    }
+  } catch (e) {
+    feedback.textContent = `未能保存：${e.message}`;
+    button.disabled = false;
+    button.textContent = '保存补充并核对';
+  }
+}
+
+function downloadLearningExport(payload) {
+  const text = JSON.stringify(payload, null, 2);
+  const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `feynman-learning-${new Date().toISOString().slice(0, 10)}.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+async function showOrphans() {
+  const hint = document.getElementById('history-hint');
+  const content = document.getElementById('history-content');
+  hint.textContent = '正在检查 Wiki 页面关联…';
+  content.innerHTML = '';
+  try {
+    const data = await api('/api/study/orphans');
+    hint.textContent = data.orphans.length ? '这些学习记录关联的原 Wiki 页面已不存在。选择新的页面路径后可重新关联。' : '所有学习记录仍关联到现有 Wiki 页面。';
+    content.innerHTML = data.orphans.map(orphan => `
+      <article class="orphan-item" data-old-path="${esc(orphan.page_path)}">
+        <div class="history-item-head"><span>${esc(orphan.page_title)}</span><small>${esc(orphan.last_activity || '')}</small></div>
+        <p>${esc(orphan.page_path)}</p>
+        <input class="orphan-new-path" type="text" placeholder="新的 pages 相对路径，例如 AI/rag/new-name.md">
+        <div class="gap-actions"><span class="gap-feedback"></span><button class="btn btn-primary btn-relink-page" type="button">重新关联</button></div>
+      </article>`).join('') || '<p class="review-empty">没有失联页面。</p>';
+  } catch (e) {
+    hint.textContent = `无法检查失联页面：${e.message}`;
+  }
+}
+
+async function relinkPage(item) {
+  const newPath = item.querySelector('.orphan-new-path').value.trim();
+  const feedback = item.querySelector('.gap-feedback');
+  const button = item.querySelector('.btn-relink-page');
+  if (!newPath) { feedback.textContent = '请输入新的 pages 相对路径。'; return; }
+  button.disabled = true;
+  try {
+    const result = await api('/api/study/relink', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ old_path: item.dataset.oldPath, new_path: newPath }),
+    });
+    feedback.textContent = `已关联到：${result.new_path}`;
+    button.remove();
+  } catch (e) {
+    feedback.textContent = `未能重新关联：${e.message}`;
+    button.disabled = false;
+  }
+}
+
 function renderPageMeta() {
   const meta = state.currentMeta;
   const tagHtml = (meta.tags || []).map(t => `<span class="meta-item tag-item">#${esc(t)}</span>`).join('');
@@ -377,7 +551,7 @@ function syncPageActions() {
   document.querySelectorAll('.act-btn').forEach(btn => {
     const field = btn.dataset.field;
     const value = btn.dataset.value;
-    btn.classList.toggle('active', (meta[field] || '') === value);
+    btn.classList.toggle('active', !btn.classList.contains('act-clear') && (meta[field] || '') === value);
   });
 }
 
@@ -876,6 +1050,64 @@ document.getElementById('btn-toggle-reference').addEventListener('click', () => 
   const expanded = body.classList.toggle('expanded');
   document.getElementById('btn-toggle-reference').textContent = expanded ? '收起完整资料' : '查看完整资料';
 });
+document.getElementById('btn-reading-settings').addEventListener('click', () => {
+  const panel = document.getElementById('reading-settings');
+  const open = panel.classList.toggle('hidden') === false;
+  document.getElementById('btn-reading-settings').setAttribute('aria-expanded', String(open));
+});
+document.getElementById('btn-theme-toggle').addEventListener('click', () => {
+  readingSettings.theme = readingSettings.theme === 'dark' ? 'light' : 'dark';
+  saveReadingSettings();
+  applyReadingSettings();
+});
+document.getElementById('btn-history').addEventListener('click', () => openHistory('gaps'));
+document.getElementById('btn-gaps').addEventListener('click', () => openHistory('gaps'));
+document.getElementById('btn-close-history').addEventListener('click', () => {
+  document.getElementById('history-modal').classList.add('hidden');
+});
+document.getElementById('history-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'history-modal') document.getElementById('history-modal').classList.add('hidden');
+});
+document.querySelectorAll('.history-tab').forEach(tab => tab.addEventListener('click', () => openHistory(tab.dataset.historyView)));
+document.getElementById('history-content').addEventListener('click', (e) => {
+  const button = e.target.closest('.btn-save-gap');
+  if (button) saveGapRevision(button.closest('.gap-item'));
+  const relinkButton = e.target.closest('.btn-relink-page');
+  if (relinkButton) relinkPage(relinkButton.closest('.orphan-item'));
+});
+document.getElementById('btn-export-data').addEventListener('click', async () => {
+  const button = document.getElementById('btn-export-data');
+  button.disabled = true;
+  try { downloadLearningExport(await api('/api/study/export')); } catch (e) { document.getElementById('history-hint').textContent = `无法导出学习数据：${e.message}`; }
+  finally { button.disabled = false; }
+});
+document.getElementById('btn-orphans').addEventListener('click', showOrphans);
+document.getElementById('btn-reset-reading').addEventListener('click', () => {
+  readingSettings = { ...defaultReadingSettings };
+  saveReadingSettings();
+  applyReadingSettings();
+});
+document.getElementById('reading-font').addEventListener('change', (e) => {
+  readingSettings.font = e.target.value;
+  saveReadingSettings();
+  applyReadingSettings();
+});
+document.getElementById('reading-width').addEventListener('change', (e) => {
+  readingSettings.width = e.target.value;
+  saveReadingSettings();
+  applyReadingSettings();
+});
+for (const [id, key, output, formatter] of [
+  ['reading-font-size', 'fontSize', 'reading-font-size-value', value => `${value}px`],
+  ['reading-line-height', 'lineHeight', 'reading-line-height-value', value => value.toFixed(2)],
+]) {
+  document.getElementById(id).addEventListener('input', (e) => {
+    readingSettings[key] = Number(e.target.value);
+    document.getElementById(output).textContent = formatter(readingSettings[key]);
+    saveReadingSettings();
+    applyReadingSettings();
+  });
+}
 document.getElementById('btn-review').addEventListener('click', () => {
   openReviewPlan();
 });
@@ -938,3 +1170,4 @@ document.getElementById('btn-reheat-graph').addEventListener('click', reheatGrap
 /* ===== 启动 ===== */
 loadConcepts();
 bindGraphEvents();
+applyReadingSettings();

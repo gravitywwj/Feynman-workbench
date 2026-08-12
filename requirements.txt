@@ -3,5 +3,8 @@ uvicorn[standard]
 openai
 python-dotenv
 markdown
+bleach
 pytest
 httpx
+playwright
+ruff

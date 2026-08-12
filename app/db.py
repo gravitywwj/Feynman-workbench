@@ -2,7 +2,7 @@
 import sqlite3
 from contextlib import contextmanager
 
-from app.config import DB_PATH, DATA_DIR
+from app.config import DATA_DIR, DB_PATH
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
