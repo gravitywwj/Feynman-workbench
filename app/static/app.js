@@ -243,31 +243,50 @@ function syncNoteButton() {
 
 function syncLocalStudyIndicators() {
   const hasRecall = state.selected && Boolean(storageGet(recallKey(state.selected.path)).trim());
-  document.querySelector('.gap-card p').textContent = hasRecall
+  const gapText = document.querySelector('.gap-card p');
+  const gapChip = document.querySelector('.gap-card .empty-chip');
+  if (gapChip?.dataset.diagnosed === 'true') return;
+  gapText.textContent = hasRecall
     ? '已保存一份本地回顾。AI 诊断接入后，会依据参考资料在这里标出遗漏、模糊与可能的误解。'
     : '完成回顾后，AI 会依据参考资料在这里指出遗漏、模糊和可能的误解。';
-  document.querySelector('.gap-card .empty-chip').textContent = hasRecall ? '等待 AI 诊断' : '等待你的回顾';
+  gapChip.textContent = hasRecall ? '等待 AI 诊断' : '等待你的回顾';
 }
 
-function openNotes() {
+async function openNotes() {
   if (!state.selected) return;
   const { path, title } = state.selected;
   document.getElementById('notes-topic').textContent = `关联知识点：${title}`;
-  document.getElementById('note-input').value = storageGet(noteKey(path));
-  document.getElementById('notes-status').textContent = '笔记仅保存在此浏览器。';
+  const input = document.getElementById('note-input');
+  input.value = storageGet(noteKey(path));
+  document.getElementById('notes-status').textContent = '正在读取笔记…';
   document.getElementById('notes-modal').classList.remove('hidden');
-  setTimeout(() => document.getElementById('note-input').focus(), 0);
+  try {
+    const note = await api('/api/study/notes?page_path=' + encodeURIComponent(path));
+    input.value = note.content || '';
+    storageSet(noteKey(path), input.value);
+    document.getElementById('notes-status').textContent = note.updated_at ? `已从本地学习库恢复，更新于 ${note.updated_at}。` : '可记录理解、疑问或项目联想。';
+  } catch (e) {
+    document.getElementById('notes-status').textContent = '学习库暂不可用，当前内容仅保存在浏览器。';
+  }
+  setTimeout(() => input.focus(), 0);
 }
 
 function closeNotes() {
   document.getElementById('notes-modal').classList.add('hidden');
 }
 
-function saveNotes() {
+async function saveNotes() {
   if (!state.selected) return;
   const value = document.getElementById('note-input').value;
   storageSet(noteKey(state.selected.path), value);
-  document.getElementById('notes-status').textContent = value.trim() ? '已保存到此浏览器。' : '空白笔记不会显示在“仅笔记”图谱中。';
+  try {
+    await api('/api/study/notes?page_path=' + encodeURIComponent(state.selected.path), {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: value }),
+    });
+    document.getElementById('notes-status').textContent = value.trim() ? '已保存到本地学习库。' : '笔记已清空。';
+  } catch (e) {
+    document.getElementById('notes-status').textContent = '学习库暂不可用，已保存在浏览器。';
+  }
   syncNoteButton();
   if (G.allNodes.length) refreshGraphData(false);
 }
@@ -310,10 +329,39 @@ function nextRecallGuide() {
   document.getElementById('recall-editor-guide').textContent = RECALL_GUIDES[recallGuideIndex];
 }
 
-function saveRecall() {
+async function saveRecall() {
   if (!state.selected) return;
-  storageSet(recallKey(state.selected.path), document.getElementById('recall-input').value);
-  setRecallStage('complete');
+  const value = document.getElementById('recall-input').value.trim();
+  if (value.length < 24) {
+    document.getElementById('recall-editor-guide').textContent = '先再多讲一点：至少说明它是什么、为什么重要，或给出一个例子。';
+    return;
+  }
+  const button = document.getElementById('btn-save-recall');
+  button.disabled = true; button.textContent = '正在生成诊断…';
+  storageSet(recallKey(state.selected.path), value);
+  try {
+    const result = await api('/api/study/sessions', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ page_path: state.selected.path, explanation: value }),
+    });
+    const tutor = result.turns.find(turn => turn.role === 'tutor')?.content || '请回到资料页，核对刚才最不确定的地方。';
+    const gaps = result.gaps.map(gap => gap.content).join('；') || '这次讲解结构完整，可以尝试用更短的话再复述一次。';
+    const sourceHint = result.diagnosis_source === 'llm'
+      ? '本次反馈由已配置的学习助手依据参考资料生成。'
+      : '当前使用本地结构检查；配置学习助手密钥后，会依据参考资料作更细致的核对。';
+    document.querySelector('#recall-complete .assistant-message p').textContent = `已建立本次学习会话。${sourceHint} ${gaps} 接下来想一想：${tutor}`;
+    document.querySelector('.gap-card p').textContent = result.gaps.length
+      ? `本次识别出 ${result.gaps.length} 个待澄清点，可在下一轮回顾时逐一补全。`
+      : '本次讲解结构完整；下一步可回到资料，用更短的话再复述一次。';
+    const gapChip = document.querySelector('.gap-card .empty-chip');
+    gapChip.textContent = result.gaps.length ? `${result.gaps.length} 个待澄清点` : '本次讲解已保存';
+    gapChip.dataset.diagnosed = 'true';
+    setRecallStage('complete');
+  } catch (e) {
+    document.getElementById('recall-editor-guide').textContent = `学习会话暂未保存：${e.message}`;
+  } finally {
+    button.disabled = false; button.textContent = '保存并生成诊断';
+  }
   setStep(2);
   syncLocalStudyIndicators();
 }
@@ -754,6 +802,63 @@ function switchView(showGraph) {
   }
 }
 
+function escapeMultiline(text) {
+  return esc(text).replace(/\n/g, '<br>');
+}
+
+async function openReviewPlan() {
+  const modal = document.getElementById('review-modal');
+  const hint = document.getElementById('review-modal-hint');
+  const stack = document.getElementById('review-card-stack');
+  modal.classList.remove('hidden');
+  hint.textContent = '正在读取今日到期的复习卡。';
+  stack.innerHTML = '';
+  try {
+    const data = await api('/api/study/reviews/due');
+    hint.textContent = data.total ? `今天有 ${data.total} 张卡片等待复习。先回忆，再展开答案核对。` : '今天没有到期卡。完成一次回顾后，系统会自动生成下一轮复习卡。';
+    stack.innerHTML = data.cards.length ? data.cards.map(card => `
+      <article class="review-item" data-card-id="${card.id}">
+        <small>${esc(card.page_title)} · 到期 ${esc(card.due)}</small>
+        <h3>${esc(card.question)}</h3>
+        <p class="review-answer hidden">${escapeMultiline(card.answer)}</p>
+        <button class="text-btn review-show-answer">查看答案</button>
+        <div class="review-rating hidden">
+          <button class="btn btn-quiet" data-rating="again">不记得</button>
+          <button class="btn btn-quiet" data-rating="hard">困难</button>
+          <button class="btn btn-quiet" data-rating="good">记得</button>
+          <button class="btn btn-primary" data-rating="easy">很熟</button>
+        </div>
+      </article>`).join('') : '<p class="review-empty">暂无到期卡。完成回顾后，复习卡会出现在这里。</p>';
+  } catch (e) {
+    hint.textContent = `暂时无法读取复习计划：${e.message}`;
+  }
+}
+
+document.getElementById('review-card-stack').addEventListener('click', async (e) => {
+  const item = e.target.closest('.review-item');
+  if (!item) return;
+  if (e.target.classList.contains('review-show-answer')) {
+    item.querySelector('.review-answer').classList.remove('hidden');
+    item.querySelector('.review-rating').classList.remove('hidden');
+    e.target.classList.add('hidden');
+    return;
+  }
+  const rating = e.target.dataset.rating;
+  if (!rating) return;
+  item.querySelectorAll('button').forEach(button => { button.disabled = true; });
+  try {
+    await api(`/api/study/reviews/${item.dataset.cardId}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rating }),
+    });
+    item.remove();
+    const remaining = document.querySelectorAll('#review-card-stack .review-item').length;
+    document.getElementById('review-modal-hint').textContent = remaining ? `还剩 ${remaining} 张到期卡。` : '今日复习完成，下一次会按你的评分安排。';
+    if (!remaining) document.getElementById('review-card-stack').innerHTML = '<p class="review-empty">今日复习已完成。</p>';
+  } catch (err) {
+    item.querySelectorAll('button').forEach(button => { button.disabled = false; });
+  }
+});
+
 /* ===== 事件绑定 ===== */
 document.getElementById('search-input').addEventListener('input', renderTree);
 document.querySelectorAll('.act-btn').forEach(btn => {
@@ -782,13 +887,13 @@ document.getElementById('btn-toggle-reference').addEventListener('click', () => 
   document.getElementById('btn-toggle-reference').textContent = expanded ? '收起完整资料' : '查看完整资料';
 });
 document.getElementById('btn-review').addEventListener('click', () => {
-  document.getElementById('review-modal').classList.remove('hidden');
+  openReviewPlan();
 });
 document.getElementById('btn-review-inline').addEventListener('click', () => {
-  document.getElementById('review-modal').classList.remove('hidden');
+  openReviewPlan();
 });
 document.getElementById('btn-review-start').addEventListener('click', () => {
-  document.getElementById('review-modal').classList.remove('hidden');
+  openReviewPlan();
 });
 document.getElementById('btn-close-review').addEventListener('click', () => {
   document.getElementById('review-modal').classList.add('hidden');

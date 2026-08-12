@@ -75,4 +75,8 @@ def wiki(tmp_path, monkeypatch):
     )
     (pages / "dashboard.md").write_text(DASHBOARD, encoding="utf-8")
     monkeypatch.setenv("FEYNMAN_WIKI_PATH", str(tmp_path))
+    monkeypatch.setattr("app.config.DB_PATH", tmp_path / "feynman.db")
+    monkeypatch.setattr("app.db.DB_PATH", tmp_path / "feynman.db")
+    from app import db
+    db.init_db()
     return tmp_path

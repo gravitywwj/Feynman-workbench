@@ -215,23 +215,24 @@
       <div class="clarity-checklist" aria-label="表达检查清单"><span>核心概念</span><span>关键机制</span><span>具体例子</span></div>
       <label class="sr-only" for="recall-input">你的回顾表达</label>
       <textarea id="recall-input" maxlength="2000" placeholder="不看资料，写下你现在能讲清楚的内容…"></textarea>
-      <div class="modal-footer"><button id="btn-recall-hint" class="btn btn-quiet">换一个引导问题</button><button id="btn-save-recall" class="btn btn-primary">保存本次回顾</button></div>
+      <div class="modal-footer"><button id="btn-recall-hint" class="btn btn-quiet">换一个引导问题</button><button id="btn-save-recall" class="btn btn-primary">保存并生成诊断</button></div>
     </div>
 
     <div id="recall-complete" class="recall-stage hidden">
-      <div class="assistant-message"><b>学习助手</b><p>本次回顾已保存。等 AI 诊断接入后，这份表达将用于标出遗漏、模糊与潜在误解。</p></div>
+      <div class="assistant-message"><b>学习助手</b><p>本次回顾已保存。正在整理你的讲解与下一步检查点。</p></div>
       <button id="btn-close-recall-complete" class="btn btn-primary">回到资料页</button>
     </div>
   </div>
 </div>
 
 <div id="review-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="review-title">
-  <div class="modal-card">
+  <div class="modal-card review-modal-card">
     <div class="modal-head">
       <h2 id="review-title">复习计划</h2>
       <button class="btn-close" id="btn-close-review" aria-label="关闭">关闭</button>
     </div>
-    <p class="modal-hint">复习功能将在第三阶段上线：届时这里会展示到期卡片，并支持按 Again、Hard、Good、Easy 安排下一次复习。</p>
+    <p class="modal-hint" id="review-modal-hint">正在读取今日到期的复习卡。</p>
+    <div id="review-card-stack" class="review-card-stack"></div>
   </div>
 </div>
 
