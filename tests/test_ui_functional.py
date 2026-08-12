@@ -46,7 +46,20 @@ def test_reader_preferences_note_and_recall_flow(wiki):
         page = browser.new_page()
         page.goto(base_url, wait_until="networkidle")
 
-        page.get_by_text("Query Rewriting 查询改写", exact=True).click()
+        # 初始目录保持收起，点击后再展开。
+        assert page.locator(".tree-children").count() == 0
+        page.locator(".tree-dir", has_text="AI").click()
+        assert page.locator(".tree-children").count() == 1
+        page.locator(".tree-dir", has_text="AI").click()
+        assert page.locator(".tree-children").count() == 0
+        assert page.get_by_text("新收录笔记", exact=True).is_visible()
+        assert "阅读状态变化不会" in page.locator("#recent-hint").inner_text()
+
+        # 选择深层页面前按用户意图展开相应目录。
+        page.locator(".tree-dir", has_text="AI").click()
+        page.locator(".tree-dir", has_text="rag").click()
+
+        page.locator("#concept-tree").get_by_text("Query Rewriting 查询改写", exact=True).click()
         page.get_by_role("button", name="阅读外观").click()
         page.locator("#reading-font-size").fill("20")
         page.get_by_role("button", name="夜间阅读").click()
@@ -74,7 +87,9 @@ def test_reader_preferences_note_and_recall_flow(wiki):
 
         page.reload(wait_until="networkidle")
         assert page.locator("html").get_attribute("data-theme") == "dark"
-        page.get_by_text("Query Rewriting 查询改写", exact=True).click()
+        page.locator(".tree-dir", has_text="AI").click()
+        page.locator(".tree-dir", has_text="rag").click()
+        page.locator("#concept-tree").get_by_text("Query Rewriting 查询改写", exact=True).click()
         page.get_by_role("button", name="阅读外观").click()
         assert page.locator("#reading-font-size").input_value() == "20"
         browser.close()

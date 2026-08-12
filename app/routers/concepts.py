@@ -23,6 +23,16 @@ def list_concepts(
     return {"total": len(concepts), "sections": sections, "concepts": concepts}
 
 
+@router.get("/recent")
+def list_recent_concepts(
+    days: int = Query(14, ge=1, le=90, description="提醒窗口天数，仅按 frontmatter.created 计算"),
+    limit: int = Query(5, ge=1, le=20, description="最多返回几条"),
+) -> dict:
+    """新收录提醒：仅基于 Wiki 页面首次加入日期，不受状态或文件修改时间影响。"""
+    concepts = wiki_reader.recent_concepts(days=days)
+    return {"days": days, "total": len(concepts), "concepts": concepts[:limit]}
+
+
 @router.get("/page")
 def get_page(path: str = Query(..., description="pages/ 相对路径")) -> dict:
     try:

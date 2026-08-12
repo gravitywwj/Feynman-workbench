@@ -2,6 +2,7 @@
 import html
 import re
 import unicodedata
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import bleach
@@ -73,6 +74,32 @@ def scan_concepts() -> list[dict]:
             "line_count": body.count("\n") + 1,
         })
     return concepts
+
+
+def _parse_created_date(value: str) -> date | None:
+    """解析笔记在 frontmatter 中声明的首次加入日期，不读取文件系统修改时间。"""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+    except ValueError:
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+
+
+def recent_concepts(days: int = 14, today: date | None = None) -> list[dict]:
+    """返回最近首次加入 Wiki 的页面，唯一依据是 frontmatter 的 created 字段。"""
+    current_day = today or date.today()
+    cutoff = current_day - timedelta(days=days - 1)
+    recent = []
+    for concept in scan_concepts():
+        created_on = _parse_created_date(concept["created"])
+        if created_on and cutoff <= created_on <= current_day:
+            recent.append((created_on, concept))
+    recent.sort(key=lambda item: (item[0], item[1]["title"]), reverse=True)
+    return [concept for _, concept in recent]
 
 
 SAFE_TAGS = {

@@ -49,16 +49,34 @@ async function loadConcepts() {
   try {
     const data = await api('/api/concepts');
     state.concepts = data.concepts;
-    for (const c of data.concepts) {
-      const parts = c.path.split('/');
-      // 展开所有真实目录层级（例如 Financing/cashflow），而非只展开一级分区。
-      for (let i = 1; i < parts.length; i++) state.expanded.add(parts.slice(0, i).join('/'));
-    }
     document.getElementById('concept-count').textContent = data.total + ' 页';
     renderTree();
+    loadRecentNotes();
   } catch (e) {
     document.getElementById('concept-tree').innerHTML =
       `<div style="color:var(--err);padding:8px">加载失败：${esc(e.message)}</div>`;
+  }
+}
+
+async function loadRecentNotes() {
+  const count = document.getElementById('recent-count');
+  const hint = document.getElementById('recent-hint');
+  const list = document.getElementById('recent-list');
+  try {
+    const data = await api('/api/concepts/recent?days=14&limit=5');
+    count.textContent = data.total ? `${data.total} 条` : '暂无';
+    hint.textContent = `最近 ${data.days} 天首次加入的笔记。阅读状态变化不会让旧笔记重新出现。`;
+    list.innerHTML = data.concepts.map(concept => `
+      <button class="recent-note" type="button" data-path="${esc(concept.path)}">
+        <span>${esc(concept.title)}</span><small>${esc(concept.created)}</small>
+      </button>`).join('') || '<p class="recent-empty">最近没有带加入日期的新笔记。</p>';
+    list.querySelectorAll('.recent-note').forEach(button => {
+      button.addEventListener('click', () => selectConcept(button.dataset.path));
+    });
+  } catch (e) {
+    count.textContent = '—';
+    hint.textContent = '暂时无法读取新收录提醒。';
+    list.innerHTML = '';
   }
 }
 
@@ -537,11 +555,15 @@ async function relinkPage(item) {
 function renderPageMeta() {
   const meta = state.currentMeta;
   const tagHtml = (meta.tags || []).map(t => `<span class="meta-item tag-item">#${esc(t)}</span>`).join('');
+  const dateHtml = [
+    meta.created ? `<span class="meta-item">加入 ${esc(meta.created)}</span>` : '',
+    meta.updated ? `<span class="meta-item">更新 ${esc(meta.updated)}</span>` : '',
+  ].join('');
   document.getElementById('page-meta').innerHTML = `
     <span class="meta-item">${esc(meta.section || '')}</span>
     <span class="meta-item">${esc(meta.status || 'unread')}</span>
     <span class="meta-item">${esc(meta.read_time || '')}</span>
-    <span class="meta-item">更新 ${esc(meta.updated || '')}</span>
+    ${dateHtml}
     ${tagHtml}`;
 }
 

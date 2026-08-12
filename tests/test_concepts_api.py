@@ -1,4 +1,6 @@
 """概念库 API 集成测试（TestClient，fixture wiki 注入）"""
+from datetime import date
+
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -61,6 +63,26 @@ def test_get_graph(wiki):
         link["source"].endswith("query-rewriting.md") and link["target"].endswith("rag-from-scratch.md")
         for link in data["links"]
     )
+
+
+def test_recent_concepts_uses_created_not_updated_or_status(wiki):
+    today = date.today().isoformat()
+    path = wiki / "pages" / "AI" / "today-note.md"
+    path.write_text(
+        f"---\ntitle: Today's Note\ncreated: {today}\nupdated: 2000-01-01\nstatus: unread\n---\n\n# Today's Note\n",
+        encoding="utf-8",
+    )
+    r = client.get("/api/concepts/recent", params={"days": 1, "limit": 20})
+    assert r.status_code == 200
+    data = r.json()
+    today_note = next(item for item in data["concepts"] if item["path"] == "AI/today-note.md")
+    assert today_note["created"] == today
+
+    # 改阅读状态只会写入 status，既不改变 created，也不会改变提醒排序依据。
+    client.put("/api/concepts/meta", json={"path": today_note["path"], "status": "read"})
+    refreshed = client.get("/api/concepts/recent", params={"days": 1, "limit": 20}).json()
+    refreshed_note = next(item for item in refreshed["concepts"] if item["path"] == today_note["path"])
+    assert refreshed_note["created"] == today
 
 
 def test_put_meta_updates_file(wiki):
