@@ -582,7 +582,7 @@ async function onActClick(btn) {
 const G = {
   allNodes: [], allLinks: [], nodes: [], links: [], loaded: false,
   running: false, svg: null, group: null, tip: null,
-  scale: 1, tx: 0, ty: 0, drag: null, W: 0, H: 0,
+  scale: 1, tx: 0, ty: 0, drag: null, W: 0, H: 0, pinned: {},
 };
 
 const IMP_R = { high: 13, medium: 10, low: 7 };
@@ -625,6 +625,28 @@ function saveGraphSettings() {
   storageSet('feynman-graph-settings', JSON.stringify(graphSettings));
 }
 
+function loadGraphLayout() {
+  try {
+    const saved = JSON.parse(storageGet('feynman-graph-layout') || '{}');
+    return saved && typeof saved === 'object' ? saved : {};
+  } catch { return {}; }
+}
+
+function saveGraphLayout() {
+  storageSet('feynman-graph-layout', JSON.stringify(G.pinned));
+}
+
+function pinNode(node) {
+  G.pinned[node.id] = { x: Math.round(node.x), y: Math.round(node.y) };
+  saveGraphLayout();
+}
+
+function clearGraphLayout() {
+  G.pinned = {};
+  saveGraphLayout();
+  refreshGraphData(true);
+}
+
 function nodeColor(node) {
   if (graphSettings.colorMode === 'importance') return IMPORTANCE_FILL[node.importance] || '#9ca7ae';
   if (graphSettings.colorMode === 'section') {
@@ -643,8 +665,9 @@ function updateGraphScopeSummary() {
     ? '全部领域'
     : (graphSettings.sections.length ? graphSettings.sections.join('、') : '未选择领域');
   const links = G.links.length;
+  const pinned = G.nodes.filter(node => G.pinned[node.id]).length;
   document.getElementById('graph-scope-summary').textContent =
-    `当前范围：${title} · ${G.nodes.length} 个知识点 · ${links} 条关联；拖拽节点、滚轮缩放。`;
+    `当前范围：${title} · ${G.nodes.length} 个知识点 · ${links} 条关联${pinned ? ` · 已固定 ${pinned} 个位置` : ''}。`;
 }
 
 function renderGraphSettings() {
@@ -669,6 +692,7 @@ function renderGraphSettings() {
 
 async function loadGraph() {
   initGraphSettings();
+  G.pinned = loadGraphLayout();
   const data = await api('/api/concepts/graph');
   G.allNodes = data.nodes;
   G.allLinks = data.links;
@@ -702,11 +726,13 @@ function refreshGraphData(reheat = true) {
   const radius = Math.min(G.W, G.H) * 0.35;
   G.nodes = visible.map((node, index) => {
     const old = prior.get(node.id);
-    return old && !reheat ? { ...node, x: old.x, y: old.y, vx: old.vx, vy: old.vy } : {
+    const pinned = G.pinned[node.id];
+    if (pinned) return { ...node, x: pinned.x, y: pinned.y, vx: 0, vy: 0, pinned: true };
+    return old && !reheat ? { ...node, x: old.x, y: old.y, vx: old.vx, vy: old.vy, pinned: false } : {
       ...node,
       x: G.W / 2 + Math.cos(index * 2.39996) * radius,
       y: G.H / 2 + Math.sin(index * 2.39996) * radius,
-      vx: 0, vy: 0,
+      vx: 0, vy: 0, pinned: false,
     };
   });
   const byId = new Map(G.nodes.map(node => [node.id, node]));
@@ -742,6 +768,33 @@ function graphTransform() {
   G.group?.setAttribute('transform', `translate(${G.tx},${G.ty}) scale(${G.scale})`);
 }
 
+function fitGraphToView() {
+  if (!G.nodes.length) return;
+  const padding = 74;
+  const minX = Math.min(...G.nodes.map(node => node.x));
+  const maxX = Math.max(...G.nodes.map(node => node.x));
+  const minY = Math.min(...G.nodes.map(node => node.y));
+  const maxY = Math.max(...G.nodes.map(node => node.y));
+  const graphWidth = Math.max(maxX - minX, 1);
+  const graphHeight = Math.max(maxY - minY, 1);
+  G.scale = Math.max(0.45, Math.min(1.35, Math.min((G.W - padding * 2) / graphWidth, (G.H - padding * 2) / graphHeight)));
+  G.tx = G.W / 2 - ((minX + maxX) / 2) * G.scale;
+  G.ty = G.H / 2 - ((minY + maxY) / 2) * G.scale;
+  graphTransform();
+}
+
+function focusGraphNode(id) {
+  const node = G.nodes.find(item => item.id === id);
+  if (!node) return false;
+  G.scale = Math.max(G.scale, 1.12);
+  G.tx = G.W / 2 - node.x * G.scale;
+  G.ty = G.H / 2 - node.y * G.scale;
+  graphTransform();
+  graphHover(id);
+  window.setTimeout(graphUnhover, 1000);
+  return true;
+}
+
 function renderGraph() {
   if (!G.group) return;
   G.group.replaceChildren();
@@ -763,6 +816,14 @@ function renderGraph() {
     circle.setAttribute('r', radius);
     circle.setAttribute('fill', nodeColor(node));
     group.appendChild(circle);
+    if (node.pinned) {
+      const pin = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      pin.classList.add('graph-pin');
+      pin.setAttribute('r', Math.max(2.2, radius * 0.2));
+      pin.setAttribute('cx', radius * 0.56);
+      pin.setAttribute('cy', -radius * 0.56);
+      group.appendChild(pin);
+    }
     if (graphSettings.showLabels) {
       const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
       label.classList.add('graph-label');
@@ -781,6 +842,7 @@ function renderGraph() {
 function reheatGraph() {
   if (!G.nodes.length) return;
   G.nodes.forEach((node, index) => {
+    if (node.pinned) return;
     node.vx = Math.cos(index * 1.7) * 1.2;
     node.vy = Math.sin(index * 1.7) * 1.2;
   });
@@ -811,7 +873,7 @@ function tick() {
   }
   let energy = 0;
   for (const node of G.nodes) {
-    if (G.drag?.id === node.id) continue;
+    if (G.drag?.id === node.id || node.pinned) continue;
     node.vx += (G.W / 2 - node.x) * graphSettings.centerForce;
     node.vy += (G.H / 2 - node.y) * graphSettings.centerForce;
     node.vx *= DAMP; node.vy *= DAMP;
@@ -842,7 +904,10 @@ function graphHover(id) {
     if (link.s.id === id) hot.add(link.t.id);
     if (link.t.id === id) hot.add(link.s.id);
   }
-  G.group.querySelectorAll('.graph-node').forEach(node => node.classList.toggle('dim', !hot.has(node.dataset.id)));
+  G.group.querySelectorAll('.graph-node').forEach(node => {
+    node.classList.toggle('dim', !hot.has(node.dataset.id));
+    node.classList.toggle('focus', node.dataset.id === id);
+  });
   G.group.querySelectorAll('.graph-link').forEach(link => {
     const on = link.dataset.a === id || link.dataset.b === id;
     link.classList.toggle('dim', !on); link.classList.toggle('hot', on);
@@ -851,7 +916,7 @@ function graphHover(id) {
 
 function graphUnhover() {
   if (!G.group) return;
-  G.group.querySelectorAll('.graph-node').forEach(node => node.classList.remove('dim'));
+  G.group.querySelectorAll('.graph-node').forEach(node => node.classList.remove('dim', 'focus'));
   G.group.querySelectorAll('.graph-link').forEach(link => link.classList.remove('dim', 'hot'));
 }
 
@@ -864,7 +929,7 @@ function bindGraphEvents() {
 
   // 拖拽节点 / 空白拖动画布
   let mode = null, moved = false, startX = 0, startY = 0, baseTx = 0, baseTy = 0;
-  canvas.addEventListener('mousedown', (e) => {
+  canvas.addEventListener('pointerdown', (e) => {
     moved = false;
     const target = e.target.closest('.graph-node');
     const rect = canvas.getBoundingClientRect();
@@ -874,15 +939,17 @@ function bindGraphEvents() {
       mode = 'node';
       const id = target.dataset.id;
       const node = G.nodes.find(x => x.id === id);
+      if (!node) return;
       G.drag = { id, dx: node.x - mx, dy: node.y - my };
-      G.running = true;
+      if (!G.running) { G.running = true; requestAnimationFrame(tick); }
     } else {
       mode = 'pan';
       startX = e.clientX; startY = e.clientY; baseTx = G.tx; baseTy = G.ty;
       G.svg?.classList.add('dragging');
     }
+    canvas.setPointerCapture?.(e.pointerId);
   });
-  window.addEventListener('mousemove', (e) => {
+  canvas.addEventListener('pointermove', (e) => {
     if (mode === 'node' && G.drag) {
       moved = true;
       const rect = canvas.getBoundingClientRect();
@@ -899,10 +966,17 @@ function bindGraphEvents() {
       graphTransform();
     }
   });
-  window.addEventListener('mouseup', () => {
+  const finishGraphPointer = (e) => {
+    if (mode === 'node' && G.drag) {
+      const node = G.nodes.find(x => x.id === G.drag.id);
+      if (node && moved) { node.pinned = true; pinNode(node); updateGraphScopeSummary(); renderGraph(); }
+    }
+    if (e?.pointerId !== undefined && canvas.hasPointerCapture?.(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
     mode = null; G.drag = null;
     G.svg?.classList.remove('dragging');
-  });
+  };
+  canvas.addEventListener('pointerup', finishGraphPointer);
+  canvas.addEventListener('pointercancel', finishGraphPointer);
 
   // 滚轮缩放（以鼠标为中心）
   canvas.addEventListener('wheel', (e) => {
@@ -940,7 +1014,7 @@ function bindGraphEvents() {
   // 点击节点 → 打开页面
   canvas.addEventListener('click', (e) => {
     const target = e.target.closest('.graph-node');
-    if (!target || moved || mode === 'node') return;
+    if (!target || moved) return;
     const id = target.dataset.id;
     const c = state.concepts.find(x => x.path === id);
     if (c) { switchView(false); selectConcept(c.path); }
@@ -1125,7 +1199,9 @@ document.getElementById('review-modal').addEventListener('click', (e) => {
 });
 
 document.getElementById('btn-graph-settings').addEventListener('click', () => {
-  document.getElementById('graph-settings').classList.toggle('hidden');
+  const settings = document.getElementById('graph-settings');
+  const isOpen = settings.classList.toggle('hidden') === false;
+  document.getElementById('btn-graph-settings').setAttribute('aria-expanded', String(isOpen));
 });
 document.getElementById('btn-reset-graph').addEventListener('click', () => {
   graphSettings = defaultGraphSettings();
@@ -1166,6 +1242,13 @@ for (const [id, key, digits, redraw] of [
   });
 }
 document.getElementById('btn-reheat-graph').addEventListener('click', reheatGraph);
+document.getElementById('btn-clear-graph-layout').addEventListener('click', clearGraphLayout);
+document.getElementById('btn-graph-fit').addEventListener('click', fitGraphToView);
+document.getElementById('btn-graph-focus-current').addEventListener('click', () => {
+  if (!state.selected || !focusGraphNode(state.selected.path)) {
+    document.getElementById('graph-scope-summary').textContent = '当前学习页不在图谱范围内。请在设置中勾选它所在的知识领域。';
+  }
+});
 
 /* ===== 启动 ===== */
 loadConcepts();

@@ -164,16 +164,24 @@
 
 <div id="graph-view" class="hidden">
   <div class="graph-toolbar">
-    <div><p class="eyebrow">探索关联</p><span class="graph-hint" id="graph-scope-summary">拖拽节点、滚轮缩放，点击节点回到学习页</span></div>
-    <div class="graph-legend">
-      <span class="lg-item"><span class="dot unread"></span>未读</span>
-      <span class="lg-item"><span class="dot reading"></span>在读</span>
-      <span class="lg-item"><span class="dot read"></span>已读</span>
-      <button id="btn-graph-settings" class="btn btn-quiet">图谱设置</button>
+    <div class="graph-heading">
+      <span class="graph-orbit" aria-hidden="true"></span>
+      <div><p class="eyebrow">知识图谱</p><h2>从关联中找到下一步</h2><span class="graph-hint" id="graph-scope-summary">正在整理知识关联…</span></div>
+    </div>
+    <div class="graph-toolbar-actions">
+      <div class="graph-legend" aria-label="阅读状态图例">
+        <span class="lg-item"><span class="dot unread"></span>未读</span>
+        <span class="lg-item"><span class="dot reading"></span>在读</span>
+        <span class="lg-item"><span class="dot read"></span>已读</span>
+      </div>
+      <button id="btn-graph-focus-current" class="btn btn-quiet" type="button">定位当前页</button>
+      <button id="btn-graph-fit" class="btn btn-quiet" type="button">适配视野</button>
+      <button id="btn-graph-settings" class="btn btn-quiet" type="button" aria-expanded="false" aria-controls="graph-settings">图谱设置</button>
     </div>
   </div>
   <div class="graph-workspace">
-    <div id="graph-canvas"></div>
+    <div id="graph-canvas" aria-label="可交互知识图谱"></div>
+    <div class="graph-canvas-guide" aria-hidden="true"><span>拖动节点以固定位置</span><span>滚轮缩放，拖动画布</span></div>
     <aside id="graph-settings" class="graph-settings hidden" aria-label="图谱设置">
       <div class="settings-heading"><h2>筛选与外观</h2><button id="btn-reset-graph" class="text-btn">重置</button></div>
 
@@ -206,7 +214,8 @@
       <section class="settings-section">
         <h3>图谱力度</h3>
         <label class="range-row">向心力 <output id="graph-center-force-value">0.012</output><input id="graph-center-force" type="range" min="0.003" max="0.04" step="0.001" value="0.012"></label>
-        <button id="btn-reheat-graph" class="btn btn-quiet full-width">重新排布</button>
+        <button id="btn-reheat-graph" class="btn btn-quiet full-width" type="button">重新排列未固定节点</button>
+        <button id="btn-clear-graph-layout" class="text-btn full-width graph-reset-layout" type="button">清除手动布局</button>
       </section>
     </aside>
   </div>

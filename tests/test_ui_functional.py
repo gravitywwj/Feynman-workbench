@@ -78,3 +78,39 @@ def test_reader_preferences_note_and_recall_flow(wiki):
         page.get_by_role("button", name="阅读外观").click()
         assert page.locator("#reading-font-size").input_value() == "20"
         browser.close()
+
+
+@pytest.mark.ui
+def test_graph_node_drag_persists_and_can_be_cleared(wiki):
+    browser_paths = sorted((Path.home() / "AppData" / "Local" / "ms-playwright").glob("chromium-*/chrome-win64/chrome.exe"))
+    if not browser_paths:
+        pytest.skip("Playwright Chromium is not installed")
+
+    with run_server() as base_url, sync_playwright() as playwright:
+        try:
+            browser = playwright.chromium.launch(executable_path=str(browser_paths[-1]))
+        except PlaywrightError as exc:
+            pytest.skip(f"Playwright Chromium could not launch: {exc}")
+        page = browser.new_page()
+        page.goto(base_url, wait_until="networkidle")
+        page.get_by_role("button", name="知识图谱").click()
+        page.locator("#graph-canvas svg").wait_for(state="visible")
+        assert page.locator(".graph-node").count() == 7
+        # 初始力导向布局短暂移动，等待稳定后再按住圆心拖动。
+        page.wait_for_timeout(1200)
+        circle = page.locator(".graph-node circle").first
+        box = circle.bounding_box()
+        assert box is not None
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        page.mouse.down()
+        page.mouse.move(box["x"] + box["width"] / 2 + 75, box["y"] + box["height"] / 2 + 40, steps=5)
+        page.mouse.up()
+        page.locator(".graph-pin").wait_for(state="visible")
+
+        page.reload(wait_until="networkidle")
+        page.get_by_role("button", name="知识图谱").click()
+        page.locator(".graph-pin").wait_for(state="visible")
+        page.get_by_role("button", name="图谱设置").click()
+        page.get_by_role("button", name="清除手动布局").click()
+        assert page.locator(".graph-pin").count() == 0
+        browser.close()
