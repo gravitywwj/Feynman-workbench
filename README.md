@@ -2,7 +2,7 @@
 
 本地 Web 学习工作台：把费曼学习法四步（选择概念 → 讲解或写出 → 识别盲区 → 复习与简化）变成可操作的界面闭环。
 
-- Wiki（D:\LLM wiki）作为内容后台：概念来源 + 批改对照；Obsidian 照常阅读。
+- 个人Wiki作为内容后台：概念来源 + 批改对照；Obsidian 照常阅读。
 - 工作台只读 wiki 的 `pages/`，产出（缺口报告/简化修订稿）可导出草稿到 `wiki/review/`，由 Hermes 编译回正式页面。
 
 ## 运行
@@ -17,10 +17,9 @@ cd D:\feynman-workbench
 
 复制 `.env.example` 为 `.env`：
 
-- `DEEPSEEK_API_KEY`：LLM 调用密钥（费曼追问/批改/校验）
-- `FEYNMAN_LLM_MODEL`：默认 `deepseek-v4-flash`
-- `FEYNMAN_WIKI_PATH`：wiki 根目录，默认 `D:\LLM wiki`
-
+- `OPEN_AI_API_KEY`：LLM 调用密钥（费曼追问/批改/校验）
+- `FEYNMAN_LLM_MODEL`：
+- `FEYNMAN_WIKI_PATH`：wiki 根目录
 ## 测试
 
 ```bash
