@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>费曼学习工作台</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <img class="brand-mark" src="/static/assets/quill.png" alt="">
+    <div class="brand-text">
+      <h1>费曼学习工作台</h1>
+      <p>讲得清，才算真学会</p>
+    </div>
+  </div>
+
+  <nav class="steps" aria-label="费曼学习进度">
+    <div class="step" data-step="1"><span class="step-num">1</span><span class="step-name">选择知识点</span></div>
+    <div class="step-arrow" aria-hidden="true">—</div>
+    <div class="step" data-step="2"><span class="step-num">2</span><span class="step-name">清晰表达</span></div>
+    <div class="step-arrow" aria-hidden="true">—</div>
+    <div class="step" data-step="3"><span class="step-num">3</span><span class="step-name">识别盲区</span></div>
+    <div class="step-arrow" aria-hidden="true">—</div>
+    <div class="step" data-step="4"><span class="step-num">4</span><span class="step-name">复述与简化</span></div>
+  </nav>
+
+  <div class="top-actions">
+    <span class="study-time">今日学习时长 <b>—</b></span>
+    <button id="btn-graph" class="btn btn-quiet">知识图谱</button>
+    <button id="btn-review" class="btn btn-quiet">复习计划</button>
+  </div>
+</header>
+
+<main class="layout" id="layout-main">
+  <aside class="panel concept-panel" id="concept-panel">
+    <div class="panel-head">
+      <h2>知识库</h2>
+      <span class="badge" id="concept-count">…</span>
+    </div>
+    <label class="search-label" for="search-input">搜索知识点</label>
+    <input type="search" id="search-input" placeholder="搜索知识点" autocomplete="off">
+    <div class="tree" id="concept-tree"></div>
+    <p class="library-note">圆点标记阅读状态；点击圆点可切换状态。</p>
+  </aside>
+
+  <section class="panel page-panel" id="page-panel">
+    <div class="empty-state" id="page-empty">
+      <img class="empty-mark" src="/static/assets/quill.png" alt="">
+      <h2>从一个知识点开始</h2>
+      <p>选择左侧内容，用自己的话重新讲一遍。</p>
+    </div>
+
+    <div id="page-content" class="hidden">
+      <div class="page-title-row">
+        <div>
+          <p class="eyebrow">当前学习</p>
+          <h2 id="page-title"></h2>
+          <div class="page-meta" id="page-meta"></div>
+        </div>
+        <div class="page-title-actions">
+          <button id="btn-open-notes" class="btn btn-quiet">学习笔记</button>
+          <button id="btn-start" class="btn btn-primary">开始回顾</button>
+        </div>
+      </div>
+
+      <div class="page-actions" aria-label="页面标记">
+        <div class="act-group">
+          <span class="act-label">阅读状态</span>
+          <button class="act-btn" data-field="status" data-value="unread">未读</button>
+          <button class="act-btn" data-field="status" data-value="reading">在读</button>
+          <button class="act-btn" data-field="status" data-value="read">已读</button>
+        </div>
+        <div class="act-group">
+          <span class="act-label">重要性</span>
+          <button class="act-btn" data-field="importance" data-value="high">高</button>
+          <button class="act-btn" data-field="importance" data-value="medium">中</button>
+          <button class="act-btn" data-field="importance" data-value="low">低</button>
+          <button class="act-btn act-clear" data-field="importance" data-value="">清除</button>
+        </div>
+      </div>
+
+      <section class="reference-card" aria-labelledby="reference-title">
+        <div class="card-heading">
+          <div>
+            <p class="eyebrow">参考资料</p>
+            <h3 id="reference-title">先用它校准理解</h3>
+          </div>
+          <button id="btn-toggle-reference" class="text-btn">查看完整资料</button>
+        </div>
+        <article id="page-body" class="markdown-body reference-body"></article>
+      </section>
+
+      <section class="recall-ready-card" aria-labelledby="recall-ready-title">
+        <div>
+          <p class="eyebrow">完成阅读后</p>
+          <h3 id="recall-ready-title">合上资料，开始回顾</h3>
+          <p>先从记忆中重建你的理解，再回头核对遗漏。这比边看边抄更能暴露真正的掌握程度。</p>
+        </div>
+        <button id="btn-start-inline" class="btn btn-primary">进入回顾会话</button>
+      </section>
+    </div>
+  </section>
+
+  <aside class="right-rail">
+    <section class="panel path-card">
+      <div class="panel-head"><h2>学习路径 · 费曼四步法</h2></div>
+      <ol class="guide-list">
+        <li data-guide-step="1"><span>1</span><div><b>选择知识点</b><small>明确现在要学什么</small></div></li>
+        <li data-guide-step="2"><span>2</span><div><b>清晰表达</b><small>用自己的话说清核心</small></div></li>
+        <li data-guide-step="3"><span>3</span><div><b>识别盲区</b><small>AI 会标出薄弱点</small></div></li>
+        <li data-guide-step="4"><span>4</span><div><b>复述与简化</b><small>把理解讲得更简单</small></div></li>
+      </ol>
+    </section>
+
+    <section class="panel gap-card">
+      <div class="panel-head"><h2>尚待澄清的地方</h2></div>
+      <p>完成讲解后，AI 会依据参考资料在这里指出遗漏、模糊和可能的误解。</p>
+      <span class="empty-chip">等待你的讲解</span>
+    </section>
+
+    <section class="panel review-card">
+      <div class="panel-head"><h2>今日复习计划</h2><button id="btn-review-inline" class="text-btn">查看全部</button></div>
+      <p>复习卡会在完成学习闭环后加入这里。</p>
+      <button id="btn-review-start" class="btn btn-quiet">打开复习计划</button>
+    </section>
+  </aside>
+</main>
+
+<div id="graph-view" class="hidden">
+  <div class="graph-toolbar">
+    <div><p class="eyebrow">探索关联</p><span class="graph-hint" id="graph-scope-summary">拖拽节点、滚轮缩放，点击节点回到学习页</span></div>
+    <div class="graph-legend">
+      <span class="lg-item"><span class="dot unread"></span>未读</span>
+      <span class="lg-item"><span class="dot reading"></span>在读</span>
+      <span class="lg-item"><span class="dot read"></span>已读</span>
+      <button id="btn-graph-settings" class="btn btn-quiet">图谱设置</button>
+    </div>
+  </div>
+  <div class="graph-workspace">
+    <div id="graph-canvas"></div>
+    <aside id="graph-settings" class="graph-settings hidden" aria-label="图谱设置">
+      <div class="settings-heading"><h2>筛选与外观</h2><button id="btn-reset-graph" class="text-btn">重置</button></div>
+
+      <section class="settings-section">
+        <h3>展示范围</h3>
+        <p class="settings-help">选择需要进入当前图谱的知识领域。</p>
+        <div id="graph-section-list" class="check-list"></div>
+      </section>
+
+      <section class="settings-section">
+        <h3>内容筛选</h3>
+        <label class="switch-row"><span>仅显示已写笔记的内容</span><input id="graph-notes-only" type="checkbox"><i></i></label>
+        <label class="switch-row"><span>显示孤立节点</span><input id="graph-show-isolated" type="checkbox" checked><i></i></label>
+        <fieldset class="status-filter"><legend>阅读状态</legend>
+          <label><input type="checkbox" value="unread" checked> 未读</label>
+          <label><input type="checkbox" value="reading" checked> 在读</label>
+          <label><input type="checkbox" value="read" checked> 已读</label>
+        </fieldset>
+      </section>
+
+      <section class="settings-section">
+        <h3>颜色与外观</h3>
+        <label class="field-label">节点颜色<select id="graph-color-mode"><option value="status">按阅读状态</option><option value="importance">按重要性</option><option value="section">按知识领域</option></select></label>
+        <label class="switch-row"><span>显示节点文字</span><input id="graph-show-labels" type="checkbox" checked><i></i></label>
+        <label class="range-row">文字透明度 <output id="graph-label-opacity-value">0.78</output><input id="graph-label-opacity" type="range" min="0" max="1" step="0.01" value="0.78"></label>
+        <label class="range-row">节点大小 <output id="graph-node-size-value">1.00</output><input id="graph-node-size" type="range" min="0.6" max="2" step="0.05" value="1"></label>
+        <label class="range-row">连线粗细 <output id="graph-link-width-value">1.00</output><input id="graph-link-width" type="range" min="0.5" max="2.5" step="0.1" value="1"></label>
+      </section>
+
+      <section class="settings-section">
+        <h3>图谱力度</h3>
+        <label class="range-row">向心力 <output id="graph-center-force-value">0.012</output><input id="graph-center-force" type="range" min="0.003" max="0.04" step="0.001" value="0.012"></label>
+        <button id="btn-reheat-graph" class="btn btn-quiet full-width">重新排布</button>
+      </section>
+    </aside>
+  </div>
+</div>
+
+<div id="notes-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="notes-title">
+  <div class="modal-card notes-modal-card">
+    <div class="modal-head">
+      <div><p class="eyebrow">学习笔记</p><h2 id="notes-title">关联笔记</h2></div>
+      <button class="btn-close" id="btn-close-notes" aria-label="关闭">关闭</button>
+    </div>
+    <p id="notes-topic" class="modal-topic"></p>
+    <label class="sr-only" for="note-input">学习笔记内容</label>
+    <textarea id="note-input" maxlength="5000" placeholder="记录你的理解、疑问、项目联想或待验证的想法…"></textarea>
+    <div class="modal-footer"><span id="notes-status">笔记仅保存在此浏览器。</span><button id="btn-save-notes" class="btn btn-primary">保存笔记</button></div>
+  </div>
+</div>
+
+<div id="recall-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="recall-title">
+  <div class="modal-card recall-modal-card">
+    <div class="modal-head">
+      <div><p class="eyebrow">费曼回顾会话</p><h2 id="recall-title">从记忆中重建理解</h2></div>
+      <button class="btn-close" id="btn-close-recall" aria-label="关闭">稍后继续</button>
+    </div>
+    <p id="recall-topic" class="modal-topic"></p>
+
+    <div id="recall-intro" class="recall-stage">
+      <div class="assistant-message"><b>学习助手</b><p id="recall-guide">先把参考资料放到一边。不要追求完整，先说出你还记得的部分。</p></div>
+      <ol class="recall-prompts">
+        <li>这个概念主要解决什么问题？</li>
+        <li>它的关键机制或步骤是什么？</li>
+        <li>你能用一个真实场景说明它吗？</li>
+      </ol>
+      <button id="btn-recall-ready" class="btn btn-primary">我准备好了，开始表达</button>
+    </div>
+
+    <div id="recall-editor" class="recall-stage hidden">
+      <div class="assistant-message"><b>学习助手</b><p id="recall-editor-guide">从你最确定的一点开始，卡住是正常的；那正是下一步要核对的地方。</p></div>
+      <div class="clarity-checklist" aria-label="表达检查清单"><span>核心概念</span><span>关键机制</span><span>具体例子</span></div>
+      <label class="sr-only" for="recall-input">你的回顾表达</label>
+      <textarea id="recall-input" maxlength="2000" placeholder="不看资料，写下你现在能讲清楚的内容…"></textarea>
+      <div class="modal-footer"><button id="btn-recall-hint" class="btn btn-quiet">换一个引导问题</button><button id="btn-save-recall" class="btn btn-primary">保存本次回顾</button></div>
+    </div>
+
+    <div id="recall-complete" class="recall-stage hidden">
+      <div class="assistant-message"><b>学习助手</b><p>本次回顾已保存。等 AI 诊断接入后，这份表达将用于标出遗漏、模糊与潜在误解。</p></div>
+      <button id="btn-close-recall-complete" class="btn btn-primary">回到资料页</button>
+    </div>
+  </div>
+</div>
+
+<div id="review-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="review-title">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2 id="review-title">复习计划</h2>
+      <button class="btn-close" id="btn-close-review" aria-label="关闭">关闭</button>
+    </div>
+    <p class="modal-hint">复习功能将在第三阶段上线：届时这里会展示到期卡片，并支持按 Again、Hard、Good、Easy 安排下一次复习。</p>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
