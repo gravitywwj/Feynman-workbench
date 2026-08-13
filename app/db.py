@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     concept TEXT NOT NULL,              -- 本次学习的概念名（默认=页面 title）
     status TEXT NOT NULL DEFAULT 'teaching',  -- teaching | gaps | simplifying | done
     tutor_turns INTEGER NOT NULL DEFAULT 3,   -- AI 追问轮数上限
+    duration_seconds INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
@@ -61,12 +62,43 @@ CREATE TABLE IF NOT EXISTS reviews (
     reviewed_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
+CREATE TABLE IF NOT EXISTS review_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_id INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+    agent TEXT NOT NULL,                -- feynman | strict
+    answer TEXT NOT NULL,
+    verdict TEXT NOT NULL,              -- pass | retry
+    feedback TEXT NOT NULL,
+    follow_up TEXT NOT NULL,
+    source TEXT NOT NULL,               -- local | llm
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS learning_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    page_path TEXT NOT NULL,
+    entity_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS diagnosis_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    gap_id INTEGER REFERENCES gaps(id) ON DELETE SET NULL,
+    verdict TEXT NOT NULL,              -- helpful | disputed
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
 CREATE INDEX IF NOT EXISTS idx_notes_page_path ON notes(page_path);
 CREATE INDEX IF NOT EXISTS idx_gaps_session ON gaps(session_id);
 CREATE INDEX IF NOT EXISTS idx_cards_due ON cards(due);
 CREATE INDEX IF NOT EXISTS idx_cards_session ON cards(session_id);
+CREATE INDEX IF NOT EXISTS idx_review_attempts_card ON review_attempts(card_id);
+CREATE INDEX IF NOT EXISTS idx_learning_events_created ON learning_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_diagnosis_feedback_session ON diagnosis_feedback(session_id);
 """
 
 
@@ -93,6 +125,11 @@ def cursor():
 def init_db() -> None:
     with cursor() as cur:
         cur.executescript(SCHEMA)
+        # SQLite CREATE TABLE cannot add a column to existing local installs.
+        # Keep this small migration here so an upgrade never discards records.
+        columns = {row["name"] for row in cur.execute("PRAGMA table_info(sessions)").fetchall()}
+        if "duration_seconds" not in columns:
+            cur.execute("ALTER TABLE sessions ADD COLUMN duration_seconds INTEGER NOT NULL DEFAULT 0")
 
 
 def rows_to_dicts(rows) -> list[dict]:

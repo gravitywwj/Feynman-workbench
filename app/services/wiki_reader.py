@@ -9,6 +9,7 @@ import bleach
 import markdown as md
 
 from app.config import get_wiki_path
+from app.services import mastery
 
 # 管理页/非概念页：不进入概念库
 EXCLUDED_FILES = {"dashboard.md"}
@@ -73,6 +74,9 @@ def scan_concepts() -> list[dict]:
             "updated": meta.get("updated", ""),
             "line_count": body.count("\n") + 1,
         })
+    states = mastery.overview(concepts)
+    for concept in concepts:
+        concept["mastery"] = states.get(concept["path"], {"level": "unseen", "label": "未接触"})
     return concepts
 
 
@@ -180,11 +184,66 @@ def build_graph() -> dict:
     return {
         "nodes": [
             {"id": c["path"], "title": c["title"], "section": c["section"],
-             "status": c["status"], "importance": c["importance"]}
+             "status": c["status"], "importance": c["importance"], "mastery": c["mastery"]}
             for c in concepts
         ],
-        "links": [{"source": a, "target": b} for a, b in sorted(links)],
+        "links": [{"source": a, "target": b, "relation": "wikilink"} for a, b in sorted(links)],
     }
+
+
+def recommend_next_concept(path: str) -> dict | None:
+    """Recommend a transparent next step, never a title-sorted pseudo-personalisation."""
+    concepts = scan_concepts()
+    by_path = {concept["path"]: concept for concept in concepts}
+    current = by_path.get(path)
+    if not current:
+        return None
+    current_mastery = current.get("mastery", {})
+    if current_mastery.get("due_cards"):
+        return {
+            **current,
+            "recommendation_reason": f"当前概念有 {current_mastery['due_cards']} 张到期复习卡，先巩固刚学过的内容。",
+            "recommendation_kind": "due_review",
+        }
+    if current_mastery.get("open_gaps"):
+        return {
+            **current,
+            "recommendation_reason": f"当前概念还有 {current_mastery['open_gaps']} 个待澄清点，先补全再扩展新主题。",
+            "recommendation_kind": "open_gap",
+        }
+    linked_paths: list[str] = []
+    for link in build_graph()["links"]:
+        if link["source"] == path:
+            linked_paths.append(link["target"])
+        elif link["target"] == path:
+            linked_paths.append(link["source"])
+    linked = [by_path[item] for item in linked_paths if item in by_path]
+    linked.sort(key=lambda concept: (
+        0 if concept.get("mastery", {}).get("open_gaps") else 1,
+        0 if concept.get("mastery", {}).get("level") in {"unseen", "read"} else 1,
+        concept["title"],
+    ))
+    if linked:
+        candidate = linked[0]
+        return {
+            **candidate,
+            "recommendation_reason": "它与当前主题在笔记中有直接 Wiki 链接；先学习这个相邻概念能延续同一条知识链。",
+            "recommendation_kind": "linked_neighbour",
+        }
+    same_section = [
+        concept for concept in concepts
+        if concept["path"] != path and concept.get("section") == current.get("section")
+        and concept.get("mastery", {}).get("level") in {"unseen", "read"}
+    ]
+    same_section.sort(key=lambda concept: concept["title"])
+    if same_section:
+        candidate = same_section[0]
+        return {
+            **candidate,
+            "recommendation_reason": "当前笔记没有可用的直接链接；这是同一知识领域中尚未完成回忆表达的概念。",
+            "recommendation_kind": "same_section",
+        }
+    return None
 
 
 def render_page_html(path: str) -> tuple[dict, str]:

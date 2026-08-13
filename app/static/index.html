@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>费曼学习工作台</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v=20260813-layout-fix">
 </head>
 <body>
 
@@ -20,23 +20,34 @@
   <nav class="steps" aria-label="费曼学习进度">
     <div class="step" data-step="1"><span class="step-num">1</span><span class="step-name">选择知识点</span></div>
     <div class="step-arrow" aria-hidden="true">—</div>
-    <div class="step" data-step="2"><span class="step-num">2</span><span class="step-name">清晰表达</span></div>
+    <div class="step" data-step="2"><span class="step-num">2</span><span class="step-name">回忆表达</span></div>
     <div class="step-arrow" aria-hidden="true">—</div>
     <div class="step" data-step="3"><span class="step-num">3</span><span class="step-name">识别盲区</span></div>
     <div class="step-arrow" aria-hidden="true">—</div>
-    <div class="step" data-step="4"><span class="step-num">4</span><span class="step-name">复述与简化</span></div>
+    <div class="step" data-step="4"><span class="step-num">4</span><span class="step-name">简化复述</span></div>
   </nav>
 
   <div class="top-actions">
-    <span class="study-time">今日学习时长 <b>—</b></span>
-    <button id="btn-theme-toggle" class="btn btn-quiet" type="button" aria-pressed="false">夜间阅读</button>
-    <button id="btn-history" class="btn btn-quiet" type="button">学习记录</button>
-    <button id="btn-graph" class="btn btn-quiet">知识图谱</button>
-    <button id="btn-review" class="btn btn-quiet">复习计划</button>
+    <span class="study-time">今日学习 <b id="study-time-value">尚无记录</b></span>
+    <div class="desktop-actions">
+      <button id="btn-theme-toggle" class="btn btn-quiet" type="button" aria-pressed="false">夜间阅读</button>
+      <button id="btn-history" class="btn btn-quiet" type="button">学习记录</button>
+      <button id="btn-graph" class="btn btn-quiet">知识图谱</button>
+      <button id="btn-review" class="btn btn-quiet">复习模块</button>
+      <button id="btn-workspace" class="btn btn-quiet" type="button">资料与设置</button>
+    </div>
+    <button id="btn-mobile-menu" class="btn btn-quiet mobile-menu-button" type="button" aria-expanded="false" aria-controls="mobile-menu">更多</button>
   </div>
 </header>
 
+<nav id="mobile-menu" class="mobile-menu hidden" aria-label="更多功能">
+  <button id="btn-mobile-history" class="btn btn-quiet" type="button">学习记录</button>
+  <button id="btn-mobile-theme" class="btn btn-quiet" type="button">切换夜间阅读</button>
+  <button id="btn-mobile-workspace" class="btn btn-quiet" type="button">资料与设置</button>
+</nav>
+
 <main class="layout" id="layout-main">
+  <button id="btn-mobile-concept-drawer" class="btn btn-quiet mobile-concept-drawer-button" type="button" aria-expanded="false" aria-controls="concept-panel">切换知识点</button>
   <aside class="panel concept-panel" id="concept-panel">
     <div class="panel-head">
       <h2>知识库</h2>
@@ -51,8 +62,11 @@
   <section class="panel page-panel" id="page-panel">
     <div class="empty-state" id="page-empty">
       <img class="empty-mark" src="/static/assets/quill.png" alt="">
-      <h2>从一个知识点开始</h2>
-      <p>选择左侧内容，用自己的话重新讲一遍。</p>
+      <p class="eyebrow">今天的下一步</p>
+      <h2 id="home-action-title">正在整理你的学习任务</h2>
+      <p id="home-action-detail">只显示一件最值得现在完成的事。</p>
+      <button id="btn-home-action" class="btn btn-primary" type="button" disabled>准备中</button>
+      <button id="btn-home-alternative" class="text-btn hidden" type="button">换一个建议</button>
     </div>
 
     <div id="page-content" class="hidden">
@@ -64,22 +78,22 @@
         </div>
         <div class="page-title-actions">
           <button id="btn-open-notes" class="btn btn-quiet">学习笔记</button>
-          <button id="btn-start" class="btn btn-primary">开始回顾</button>
+          <button id="btn-start" class="btn btn-primary">开始回忆表达</button>
         </div>
       </div>
 
       <div class="page-actions" aria-label="页面标记">
         <div class="act-group">
           <span class="act-label">阅读状态</span>
-          <button class="act-btn" data-field="status" data-value="unread">未读</button>
-          <button class="act-btn" data-field="status" data-value="reading">在读</button>
-          <button class="act-btn" data-field="status" data-value="read">已读</button>
+          <button class="act-btn" data-field="status" data-value="unread" aria-pressed="false">未读</button>
+          <button class="act-btn" data-field="status" data-value="reading" aria-pressed="false">在读</button>
+          <button class="act-btn" data-field="status" data-value="read" aria-pressed="false">已读</button>
         </div>
         <div class="act-group">
           <span class="act-label">重要性</span>
-          <button class="act-btn" data-field="importance" data-value="high">高</button>
-          <button class="act-btn" data-field="importance" data-value="medium">中</button>
-          <button class="act-btn" data-field="importance" data-value="low">低</button>
+          <button class="act-btn" data-field="importance" data-value="high" aria-pressed="false">高</button>
+          <button class="act-btn" data-field="importance" data-value="medium" aria-pressed="false">中</button>
+          <button class="act-btn" data-field="importance" data-value="low" aria-pressed="false">低</button>
           <button class="act-btn act-clear" data-field="importance" data-value="">清除</button>
         </div>
       </div>
@@ -129,10 +143,10 @@
       <section class="recall-ready-card" aria-labelledby="recall-ready-title">
         <div>
           <p class="eyebrow">完成阅读后</p>
-          <h3 id="recall-ready-title">合上资料，开始回顾</h3>
+          <h3 id="recall-ready-title">合上资料，开始回忆表达</h3>
           <p>先从记忆中重建你的理解，再回头核对遗漏。这比边看边抄更能暴露真正的掌握程度。</p>
         </div>
-        <button id="btn-start-inline" class="btn btn-primary">进入回顾会话</button>
+        <button id="btn-start-inline" class="btn btn-primary">进入回忆表达</button>
       </section>
     </div>
   </section>
@@ -142,31 +156,38 @@
       <div class="panel-head"><h2>学习路径 · 费曼四步法</h2></div>
       <ol class="guide-list">
         <li data-guide-step="1"><span>1</span><div><b>选择知识点</b><small>明确现在要学什么</small></div></li>
-        <li data-guide-step="2"><span>2</span><div><b>清晰表达</b><small>用自己的话说清核心</small></div></li>
-        <li data-guide-step="3"><span>3</span><div><b>识别盲区</b><small>AI 会标出薄弱点</small></div></li>
-        <li data-guide-step="4"><span>4</span><div><b>复述与简化</b><small>把理解讲得更简单</small></div></li>
+        <li data-guide-step="2"><span>2</span><div><b>回忆表达</b><small>用自己的话说清核心</small></div></li>
+        <li data-guide-step="3"><span>3</span><div><b>校准表达</b><small>结构提示或 AI 核对</small></div></li>
+        <li data-guide-step="4"><span>4</span><div><b>简化复述</b><small>把理解讲得更简单</small></div></li>
       </ol>
     </section>
 
     <section class="panel recent-card" aria-labelledby="recent-title">
-      <div class="panel-head"><h2 id="recent-title">新收录笔记</h2><span id="recent-count" class="badge">…</span></div>
+      <div class="panel-head"><h2 id="recent-title">资料导入提醒</h2><span id="recent-count" class="badge">…</span></div>
       <p id="recent-hint">只按笔记的加入日期提醒，不受阅读状态和修改时间影响。</p>
       <div id="recent-list" class="recent-list" aria-live="polite"></div>
     </section>
 
     <section class="panel gap-card">
       <div class="panel-head"><h2>尚待澄清的地方</h2><button id="btn-gaps" class="text-btn" type="button">处理盲区</button></div>
-      <p>完成讲解后，AI 会依据参考资料在这里指出遗漏、模糊和可能的误解。</p>
+      <p>完成讲解后，AI 会依据参考资料核对；本地模式只提示表达结构，不判断事实正误。</p>
       <span class="empty-chip">等待你的讲解</span>
     </section>
 
     <section class="panel review-card">
-      <div class="panel-head"><h2>今日复习计划</h2><button id="btn-review-inline" class="text-btn">查看全部</button></div>
-      <p>复习卡会在完成学习闭环后加入这里。</p>
-      <button id="btn-review-start" class="btn btn-quiet">打开复习计划</button>
+      <div class="panel-head"><h2>复习模块</h2><button id="btn-review-inline" class="text-btn">进入模块</button></div>
+      <p id="review-rail-hint">正在检查今天的复习安排。</p>
+      <button id="btn-review-start" class="btn btn-quiet">打开复习模块</button>
     </section>
   </aside>
 </main>
+<div id="concept-drawer-backdrop" class="concept-drawer-backdrop hidden" aria-hidden="true"></div>
+
+<nav class="mobile-bottom-nav" aria-label="主导航">
+  <button id="btn-mobile-today" class="mobile-nav-item active" type="button">今日</button>
+  <button id="btn-mobile-graph" class="mobile-nav-item" type="button">图谱</button>
+  <button id="btn-mobile-review" class="mobile-nav-item" type="button">复习</button>
+</nav>
 
 <div id="graph-view" class="hidden">
   <div class="graph-toolbar">
@@ -176,10 +197,20 @@
     </div>
     <div class="graph-toolbar-actions">
       <button id="btn-graph-back" class="btn btn-quiet" type="button">返回学习界面</button>
+      <div class="graph-scope-actions" aria-label="图谱展开范围">
+        <button id="btn-graph-one-hop" class="btn btn-quiet" type="button" aria-pressed="true">当前关联</button>
+        <button id="btn-graph-two-hops" class="btn btn-quiet" type="button" aria-pressed="false">展开到两跳</button>
+        <button id="btn-graph-all" class="btn btn-quiet" type="button" aria-pressed="false">查看全部图谱</button>
+      </div>
       <div class="graph-legend" aria-label="阅读状态图例">
         <span class="lg-item"><span class="dot unread"></span>未读</span>
         <span class="lg-item"><span class="dot reading"></span>在读</span>
         <span class="lg-item"><span class="dot read"></span>已读</span>
+      </div>
+      <div class="graph-legend mastery-legend" aria-label="掌握状态图例">
+        <span class="lg-item"><span class="mastery-dot unseen"></span>未接触</span>
+        <span class="lg-item"><span class="mastery-dot revised"></span>已复述</span>
+        <span class="lg-item"><span class="mastery-dot stable"></span>稳定掌握</span>
       </div>
       <button id="btn-graph-focus-current" class="btn btn-quiet" type="button">定位当前页</button>
       <button id="btn-graph-fit" class="btn btn-quiet" type="button">适配视野</button>
@@ -189,6 +220,19 @@
   <div class="graph-workspace">
     <div id="graph-canvas" aria-label="可交互知识图谱"></div>
     <div class="graph-canvas-guide" aria-hidden="true"><span>拖动节点以固定位置</span><span>滚轮缩放，拖动画布</span></div>
+    <aside class="graph-next-step" aria-labelledby="graph-next-title">
+      <p>下一步建议</p><h3 id="graph-next-title">正在判断当前最值得处理的概念</h3>
+      <span id="graph-next-reason">选择图谱节点后会说明推荐原因。</span>
+      <button id="btn-graph-next" class="btn btn-primary" type="button" disabled>开始回忆表达</button>
+    </aside>
+    <div class="graph-mobile-toggle" role="tablist" aria-label="图谱移动端视图">
+      <button id="btn-graph-mobile-list" class="btn btn-quiet active" type="button" role="tab" aria-selected="true">下一步建议</button>
+      <button id="btn-graph-mobile-canvas" class="btn btn-quiet" type="button" role="tab" aria-selected="false">查看图谱</button>
+    </div>
+    <section class="graph-list-alternative" aria-labelledby="graph-list-title">
+      <div><p>图谱替代视图</p><h3 id="graph-list-title">用键盘选择下一步</h3></div>
+      <div id="graph-node-list" class="graph-node-list"></div>
+    </section>
     <aside id="graph-settings" class="graph-settings hidden" aria-label="图谱设置">
       <div class="settings-heading"><h2>筛选与外观</h2><button id="btn-reset-graph" class="text-btn">重置</button></div>
 
@@ -196,6 +240,13 @@
         <h3>展示范围</h3>
         <p class="settings-help">选择需要进入当前图谱的知识领域。</p>
         <div id="graph-section-list" class="check-list"></div>
+      </section>
+
+      <section class="settings-section">
+        <h3>保存视图</h3>
+        <label class="field-label">视图名称<input id="graph-view-name" type="text" maxlength="40" placeholder="例如：AI 待回忆"></label>
+        <div class="graph-view-actions"><button id="btn-save-graph-view" class="btn btn-quiet" type="button">保存当前视图</button><select id="graph-saved-views" aria-label="已保存图谱视图"><option value="">选择已保存视图</option></select></div>
+        <button id="btn-delete-graph-view" class="text-btn full-width hidden" type="button">删除当前保存视图</button>
       </section>
 
       <section class="settings-section">
@@ -207,6 +258,12 @@
           <label><input type="checkbox" value="reading" checked> 在读</label>
           <label><input type="checkbox" value="read" checked> 已读</label>
         </fieldset>
+      </section>
+
+      <section class="settings-section">
+        <h3>关系类型</h3>
+        <p class="settings-help">当前只显示笔记正文中的 Wiki 链接。关系类型会随图谱数据一起导出。</p>
+        <label class="check-row"><input type="checkbox" checked disabled> <span>Wiki 链接</span><small id="graph-wikilink-count">0</small></label>
       </section>
 
       <section class="settings-section">
@@ -265,12 +322,42 @@
       <div class="clarity-checklist" aria-label="表达检查清单"><span>核心概念</span><span>关键机制</span><span>具体例子</span></div>
       <label class="sr-only" for="recall-input">你的回顾表达</label>
       <textarea id="recall-input" maxlength="2000" placeholder="不看资料，写下你现在能讲清楚的内容…"></textarea>
-      <div class="modal-footer"><button id="btn-recall-hint" class="btn btn-quiet">换一个引导问题</button><button id="btn-save-recall" class="btn btn-primary">保存并生成诊断</button></div>
+    <div class="voice-controls"><button id="btn-voice-recall" class="btn btn-quiet" type="button">开始口述</button><span id="voice-status" aria-live="polite">可使用浏览器语音输入，也可继续键入。</span></div>
+    <div class="modal-footer"><button id="btn-recall-hint" class="btn btn-quiet">换一个引导问题</button><button id="btn-save-recall" class="btn btn-primary">保存并生成诊断</button></div>
     </div>
 
     <div id="recall-complete" class="recall-stage hidden">
-      <div class="assistant-message"><b>学习助手</b><p>本次回顾已保存。正在整理你的讲解与下一步检查点。</p></div>
-      <button id="btn-close-recall-complete" class="btn btn-primary">回到资料页</button>
+      <section class="diagnosis-summary" aria-live="polite">
+        <div class="diagnosis-block"><b id="diagnosis-strengths-title">你已经讲清楚的内容</b><ul id="diagnosis-strengths"></ul></div>
+        <div class="diagnosis-block"><b id="diagnosis-gaps-title">需要补全的盲区</b><ul id="diagnosis-gaps"></ul></div>
+        <div class="diagnosis-block"><b>下一次表达任务</b><p id="diagnosis-next-task"></p></div>
+        <p id="diagnosis-confidence" class="diagnosis-confidence"></p>
+        <div id="diagnosis-feedback" class="diagnosis-feedback hidden"><span>这次提示是否贴合你的表达？</span><button class="text-btn" data-diagnosis-feedback="helpful" type="button">有帮助</button><button class="text-btn" data-diagnosis-feedback="disputed" type="button">标记误判</button></div>
+      </section>
+      <button id="btn-start-simplify" class="btn btn-primary">补充后，用更简单的话再讲一次</button>
+    </div>
+
+    <div id="recall-simplify" class="recall-stage hidden">
+      <div class="assistant-message"><b>第二次表达</b><p>针对刚才的盲区，用更短、更清楚的话重新解释。不要追求完美，补上关键因果或一个例子即可。</p></div>
+      <label class="sr-only" for="simplify-input">第二次表达</label>
+      <textarea id="simplify-input" maxlength="2000" placeholder="用自己的话再讲一次，重点补上刚才最薄弱的部分…"></textarea>
+      <div class="modal-footer"><button id="btn-save-simplify" class="btn btn-primary">保存第二次表达</button></div>
+    </div>
+
+    <div id="recall-outcome" class="recall-stage hidden">
+      <section class="learning-outcome" aria-live="polite">
+        <p class="eyebrow">本次学习结果</p>
+        <h3>你完成了一次可追溯的理解检查</h3>
+        <div class="outcome-grid"><div><b>本次掌握点</b><ul id="outcome-strengths"></ul></div><div><b>仍待澄清</b><ul id="outcome-gaps"></ul></div></div>
+        <p id="outcome-review" class="outcome-next"></p>
+        <button id="btn-outcome-next" class="btn btn-primary" type="button">开始推荐的下一概念</button>
+        <button id="btn-outcome-close" class="btn btn-quiet" type="button">回到学习资料</button>
+        <details class="outcome-detail">
+          <summary>查看两次表达与分析</summary>
+          <div class="outcome-grid"><div><b>第二次表达的新增内容</b><ul id="outcome-improvements"></ul></div><div><b>简化时需留意</b><ul id="outcome-tradeoffs"></ul></div></div>
+          <div class="expression-compare"><div><b>第一次表达</b><p id="outcome-first"></p></div><div><b>第二次表达</b><p id="outcome-second"></p></div></div>
+        </details>
+      </section>
     </div>
   </div>
 </div>
@@ -278,10 +365,19 @@
 <div id="review-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="review-title">
   <div class="modal-card review-modal-card">
     <div class="modal-head">
-      <h2 id="review-title">复习计划</h2>
+      <div><p class="eyebrow">独立复习模块</p><h2 id="review-title">把记忆拉回来</h2></div>
       <button class="btn-close" id="btn-close-review" aria-label="关闭">关闭</button>
     </div>
-    <p class="modal-hint" id="review-modal-hint">正在读取今日到期的复习卡。</p>
+    <p class="modal-hint" id="review-modal-hint">先凭记忆作答，再用教练反馈与参考答案校对。</p>
+    <div id="review-progress" class="review-progress" aria-live="polite"></div>
+    <div class="review-principles" aria-label="复习原则">
+      <span>主动回忆优先</span><span>默认节奏：1 天、3 天、7 天</span><span>评分决定下一次间隔</span>
+    </div>
+    <div class="review-mode-tabs" role="tablist" aria-label="复习模式">
+      <button class="review-mode-tab active" type="button" data-review-mode="scheduled" role="tab" aria-selected="true">计划复习</button>
+      <button class="review-mode-tab" type="button" data-review-mode="cram" role="tab" aria-selected="false">突击检查</button>
+    </div>
+    <div id="review-mode-description" class="review-mode-description">仅显示今天到期的卡片。完成后，下一次日期会按你的评分调整。</div>
     <div id="review-card-stack" class="review-card-stack"></div>
   </div>
 </div>
@@ -292,7 +388,7 @@
       <div><p class="eyebrow">学习记录</p><h2 id="history-title">继续处理你的理解</h2></div>
       <button class="btn-close" id="btn-close-history" type="button" aria-label="关闭">关闭</button>
     </div>
-    <div class="history-actions"><button id="btn-export-data" class="text-btn" type="button">导出学习数据</button><button id="btn-orphans" class="text-btn" type="button">检查失联页面</button></div>
+    <div class="history-actions"><button id="btn-export-data" class="text-btn" type="button">导出学习数据</button><label class="text-btn import-label" for="import-data-file">导入学习数据</label><input id="import-data-file" type="file" accept="application/json,.json" class="sr-only"><button id="btn-orphans" class="text-btn" type="button">检查失联页面</button><button id="btn-weekly-report" class="text-btn" type="button">本周学习报告</button></div>
     <div class="history-tabs" role="tablist" aria-label="学习记录内容">
       <button class="history-tab active" type="button" data-history-view="gaps" role="tab" aria-selected="true">待处理盲区</button>
       <button class="history-tab" type="button" data-history-view="sessions" role="tab" aria-selected="false">学习历史</button>
@@ -302,6 +398,30 @@
   </div>
 </div>
 
-<script src="/static/app.js"></script>
+<div id="workspace-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="workspace-title">
+  <div class="modal-card workspace-modal-card">
+    <div class="modal-head"><div><p class="eyebrow">资料与设置</p><h2 id="workspace-title">建立本地学习空间</h2></div><button class="btn-close" id="btn-close-workspace" type="button">关闭</button></div>
+    <p class="modal-hint">选择的资料、笔记和学习记录都保留在本机。只有开启 AI 深度诊断并配置密钥时，回顾文本才会发送给所选模型服务。</p>
+    <fieldset class="workspace-choice"><legend>学习资料</legend>
+      <label><input type="radio" name="workspace-mode" value="local" checked> 连接本地 Wiki</label>
+      <label><input type="radio" name="workspace-mode" value="demo"> 先体验两分钟示例</label>
+    </fieldset>
+    <label class="field-label" id="workspace-path-label">Wiki 根目录（其中需包含 pages）<input id="workspace-path" type="text" autocomplete="off" placeholder="D:\\你的 Wiki"></label>
+    <div class="workspace-preview"><button id="btn-choose-workspace" class="btn btn-quiet" type="button">选择资料文件夹</button><button id="btn-preview-workspace" class="btn btn-quiet" type="button">预览扫描结果</button><p id="workspace-preview-result" aria-live="polite">尚未预览。只会读取你确认的文件夹，不会扫描其他目录，也不会改写任何 Wiki 文件。</p></div>
+    <fieldset class="workspace-choice"><legend>诊断方式</legend>
+      <label><input type="radio" name="diagnostic-mode" value="local" checked> 完全本地结构检查</label>
+      <label><input type="radio" name="diagnostic-mode" value="ai"> AI 深度诊断（需已配置密钥）</label>
+    </fieldset>
+    <label class="field-label">每日复习目标 <input id="daily-review-goal" type="number" min="1" max="50" value="5"></label>
+    <fieldset class="workspace-choice"><legend>当前学习目标</legend>
+      <label><input type="radio" name="learning-goal" value="long_term" checked> 长期掌握</label>
+      <label><input type="radio" name="learning-goal" value="exam"> 考前突击</label>
+      <label><input type="radio" name="learning-goal" value="presentation"> 项目汇报</label>
+    </fieldset>
+    <div class="modal-footer"><span id="workspace-status" aria-live="polite"></span><button id="btn-save-workspace" class="btn btn-primary" type="button">保存学习空间</button></div>
+  </div>
+</div>
+
+<script src="/static/app.js?v=20260813-layout-fix"></script>
 </body>
 </html>

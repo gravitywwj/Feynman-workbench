@@ -41,7 +41,9 @@ def get_page(path: str = Query(..., description="pages/ 相对路径")) -> dict:
         raise HTTPException(status_code=400, detail=str(e))
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"页面不存在: {path}")
+    concepts = {item["path"]: item for item in wiki_reader.scan_concepts()}
     meta.setdefault("path", path)
+    meta["mastery"] = concepts.get(path, {}).get("mastery", {"level": "unseen", "label": "未接触"})
     meta["read_time"] = wiki_reader.display_size(meta.get("line_count", 0) or 0)
     return {"meta": meta, "html": html}
 
@@ -50,6 +52,21 @@ def get_page(path: str = Query(..., description="pages/ 相对路径")) -> dict:
 def get_graph() -> dict:
     """知识图谱：节点=概念页，边=页间 wikilink。"""
     return wiki_reader.build_graph()
+
+
+@router.get("/preview")
+def preview_workspace(path: str = Query(..., description="候选 Wiki 根目录")) -> dict:
+    """Validate a local Wiki folder before the user chooses it."""
+    from pathlib import Path
+
+    root = Path(path).expanduser()
+    pages = root / "pages"
+    if not root.is_absolute() or not pages.is_dir():
+        raise HTTPException(status_code=400, detail="该文件夹需要是包含 pages 子目录的本地 Wiki 根目录")
+    concepts = []
+    for item in sorted(pages.rglob("*.md"))[:5]:
+        concepts.append(item.relative_to(pages).as_posix())
+    return {"wiki_path": str(root), "page_count": sum(1 for _ in pages.rglob("*.md")), "examples": concepts}
 
 
 class MetaUpdate(BaseModel):

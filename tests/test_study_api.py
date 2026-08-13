@@ -24,6 +24,133 @@ def test_create_session_persists_explanation_gaps_and_cards(wiki):
     assert detail.json()["session"]["id"] == data["session"]["id"]
 
 
+def test_session_can_be_simplified_into_learning_outcome(wiki):
+    created = client.post("/api/study/sessions", json={
+        "page_path": PAGE,
+        "explanation": "查询改写会补足问题中的对象、场景和约束，使检索更接近真实任务。例如把模糊问题改成包含上下文的查询。",
+    }).json()
+    completed = client.post(f"/api/study/sessions/{created['session']['id']}/simplify", json={
+        "explanation": "查询改写就是先补全问题条件，再让检索系统用更明确的查询找资料。例如给问题加上对象和场景。",
+    })
+    assert completed.status_code == 200
+    outcome = completed.json()["outcome"]
+    assert outcome["first_explanation"]
+    assert outcome["second_explanation"].startswith("查询改写就是")
+    assert outcome["next_review_date"]
+    assert "improvements" in outcome
+    assert "reassessment_source" in outcome
+
+
+def test_learning_outcome_explains_quality_gains_when_structure_is_unchanged(wiki):
+    created = client.post("/api/study/sessions", json={
+        "page_path": PAGE,
+        "explanation": (
+            "查询改写会补足问题中的对象、场景和约束条件，所以检索能更准确地返回资料。"
+            "系统还会检查输入限制和异常情况，以避免不完整的问题误导后续判断。"
+        ),
+    }).json()
+    completed = client.post(f"/api/study/sessions/{created['session']['id']}/simplify", json={
+        "explanation": "查询改写像给问题填一张申请单：补上对象和场景，再交给检索系统找资料。",
+    })
+
+    assert completed.status_code == 200
+    outcome = completed.json()["outcome"]
+    assert any("申请单" in item for item in outcome["improvements"])
+    assert any("更紧凑" in item for item in outcome["improvements"])
+
+
+def test_second_expression_reassesses_local_structure_and_persists_feedback(wiki):
+    first = client.post("/api/study/sessions", json={
+        "page_path": PAGE,
+        "elapsed_seconds": 75,
+        "explanation": "查询改写就是把问题说得更清楚，让检索更容易找到相关资料。",
+    })
+    assert first.status_code == 200
+    created = first.json()
+    assert created["gaps"]
+    session_id = created["session"]["id"]
+    feedback = client.post(f"/api/study/sessions/{session_id}/diagnosis-feedback", json={"verdict": "disputed"})
+    assert feedback.status_code == 200
+    completed = client.post(f"/api/study/sessions/{session_id}/simplify", json={
+        "elapsed_seconds": 125,
+        "explanation": "查询改写先补上对象和约束，再让检索系统查找资料。例如把模糊问题改成带场景的查询。",
+    })
+    assert completed.status_code == 200
+    outcome = completed.json()["outcome"]
+    assert outcome["remaining_gaps"] == []
+    assert any("新增" in item for item in outcome["improvements"])
+    detail = client.get(f"/api/study/sessions/{session_id}").json()
+    assert detail["diagnosis_feedback"][0]["verdict"] == "disputed"
+    summary = client.get("/api/study/today-summary").json()
+    assert summary["elapsed_seconds"] >= 125
+
+
+def test_home_action_prioritizes_a_startable_concept(wiki):
+    response = client.get("/api/study/home")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["type"] == "start"
+    assert data["page_path"].endswith(".md")
+    assert data["reason"] == "mastery_state"
+    assert "尚未留下" in data["detail"] or "已读完" in data["detail"]
+    assert data["alternatives"]
+
+
+def test_workspace_preview_and_demo_setup_activate_a_first_run_experience(wiki):
+    preview = client.get("/api/concepts/preview", params={"path": str(wiki)})
+    assert preview.status_code == 200
+    assert preview.json()["page_count"] >= 1
+    settings = client.put("/api/study/workspace", json={
+        "mode": "demo", "wiki_path": None, "diagnostic_mode": "local", "daily_review_goal": 7,
+    })
+    assert settings.status_code == 200
+    assert settings.json()["mode"] == "local"
+    assert settings.json()["uses_environment_path"] is True
+    assert settings.json()["configured"] is True
+    assert settings.json()["daily_review_goal"] == 7
+    assert settings.json()["learning_goal"] == "long_term"
+
+
+def test_folder_picker_can_be_cancelled_without_touching_workspace(wiki, monkeypatch):
+    class FakeRoot:
+        def withdraw(self): pass
+        def attributes(self, *_): pass
+        def destroy(self): pass
+
+    import tkinter
+    from tkinter import filedialog
+
+    monkeypatch.setattr(tkinter, "Tk", FakeRoot)
+    monkeypatch.setattr(filedialog, "askdirectory", lambda **_: "")
+    response = client.post("/api/study/workspace/pick-folder")
+    assert response.status_code == 200
+    assert response.json() == {"cancelled": True}
+
+
+def test_review_summary_report_and_export_import_are_additive(wiki):
+    created = client.post("/api/study/sessions", json={
+        "page_path": PAGE,
+        "explanation": "查询改写会补全任务对象和上下文条件，所以检索系统能把模糊问题变得更可执行。例如给问题补上目标用户和使用场景。",
+    }).json()
+    session_id = created["session"]["id"]
+    client.post(f"/api/study/sessions/{session_id}/simplify", json={
+        "explanation": "查询改写就是把缺少条件的问题说完整，让检索用更清楚的说法找资料。例如加入对象、目标和场景。",
+    })
+    summary = client.get("/api/study/reviews/summary")
+    assert summary.status_code == 200
+    assert summary.json()["goal"] >= 1
+    report = client.get("/api/study/weekly-report")
+    assert report.status_code == 200
+    assert report.json()["summary"]["completed_sessions"] >= 1
+    exported = client.get("/api/study/export").json()
+    preview = client.post("/api/study/import/preview", json={"payload": exported})
+    assert preview.status_code == 200
+    assert preview.json()["incoming"]["sessions"] >= 1
+    imported = client.post("/api/study/import", json={"payload": exported})
+    assert imported.status_code == 200
+    assert imported.json()["imported"]["sessions"] == 0
+
+
 def test_short_explanation_rejected(wiki):
     response = client.post("/api/study/sessions", json={"page_path": PAGE, "explanation": "太短"})
     assert response.status_code == 400
@@ -45,17 +172,41 @@ def test_due_card_can_be_reviewed(wiki):
     }).json()
     due = client.get("/api/study/reviews/due")
     assert due.status_code == 200
+    assert due.json()["cards"] == []
+    cram = client.get("/api/study/reviews/queue", params={"mode": "cram"})
+    assert cram.status_code == 200
+    assert cram.json()["total"] >= 1
     card_id = created["cards"][0]["id"]
     review = client.post(f"/api/study/reviews/{card_id}", json={"rating": "good"})
     assert review.status_code == 200
     assert review.json()["interval"] >= 1
     assert review.json()["reps"] == 1
+    assert review.json()["interval"] == 3
+
+
+def test_strict_review_attempt_is_persisted_and_queue_supports_cram(wiki):
+    created = client.post("/api/study/sessions", json={
+        "page_path": PAGE,
+        "explanation": "查询改写会补足问题中的对象、任务与上下文，使检索系统能返回更贴近用户目标的内容。例如把模糊问题改成包含场景和约束条件的查询。",
+    }).json()
+    card_id = created["cards"][0]["id"]
+    attempt = client.post(f"/api/study/reviews/{card_id}/attempt", json={
+        "agent": "strict",
+        "answer": "查询改写的目的是让检索条件更明确，通过补上对象、场景和约束来改善召回。例如把泛泛的问题改成可执行的查询。",
+    })
+    assert attempt.status_code == 200
+    data = attempt.json()
+    assert data["agent"] == "strict"
+    assert data["agent_name"] == "突击教练"
+    assert data["verdict"] in {"pass", "retry"}
+    exported = client.get("/api/study/export").json()
+    assert exported["review_attempts"][0]["card_id"] == card_id
 
 
 def test_history_and_gap_revision_are_persisted(wiki):
     created = client.post("/api/study/sessions", json={
         "page_path": PAGE,
-        "explanation": "查询改写先识别用户问题里缺失的条件，再补充具体对象和上下文，以便检索系统找到更匹配的资料。例如询问用途时，可以补上要比较的产品和使用场景。",
+        "explanation": "查询改写能让检索系统找到更匹配资料，但我还说不清它具体如何做到。",
     }).json()
     history = client.get("/api/study/history")
     assert history.status_code == 200
@@ -78,9 +229,9 @@ def test_review_schedule_changes_by_rating(wiki):
     }).json()
     card_id = created["cards"][0]["id"]
     good = client.post(f"/api/study/reviews/{card_id}", json={"rating": "good"}).json()
-    assert (good["interval"], good["reps"], good["ease"]) == (1, 1, 2.5)
+    assert (good["interval"], good["reps"], good["ease"]) == (3, 1, 2.5)
     easy = client.post(f"/api/study/reviews/{card_id}", json={"rating": "easy"}).json()
-    assert (easy["interval"], easy["reps"]) == (7, 2)
+    assert (easy["interval"], easy["reps"]) == (14, 2)
     again = client.post(f"/api/study/reviews/{card_id}", json={"rating": "again"}).json()
     assert (again["interval"], again["reps"]) == (1, 0)
 
@@ -89,7 +240,7 @@ def test_gap_revision_validation_and_missing_gap(wiki):
     assert client.post("/api/study/gaps/999/revision", json={"revision": "足够长的补充说明，但这个盲区并不存在，因此不应保存。"}).status_code == 404
     created = client.post("/api/study/sessions", json={
         "page_path": PAGE,
-        "explanation": "查询改写通过补充上下文改善检索效果。例如在问题中加入明确对象和约束条件，使后续召回结果更接近真正要解决的任务。",
+        "explanation": "查询改写通过补充上下文改善检索效果，使后续召回结果更接近真正要解决的任务。",
     }).json()
     gap_id = created["gaps"][0]["id"]
     assert client.post(f"/api/study/gaps/{gap_id}/revision", json={"revision": "太短"}).status_code == 400

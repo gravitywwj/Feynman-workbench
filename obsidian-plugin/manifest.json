@@ -1,0 +1,9 @@
+{
+  "id": "feynman-workbench-launcher",
+  "name": "Feynman Workbench Launcher",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Open the current note in a local Feynman Workbench session.",
+  "author": "Feynman Workbench",
+  "isDesktopOnly": true
+}
