@@ -606,6 +606,9 @@ async function saveSimplify() {
     const next = outcome.recommended_next;
     document.getElementById('outcome-review').textContent = `下一次复习：${outcome.next_review_date || '将在复习模块安排'}。${next ? `建议下一概念：${next.title}。${next.recommendation_reason || ''}` : ''}`;
     document.getElementById('btn-outcome-next').classList.toggle('hidden', !next);
+    ensureOutcomeReflectionButton();
+    document.getElementById('btn-outcome-reflection').disabled = false;
+    document.getElementById('btn-outcome-reflection').textContent = '保存这次心得';
     setRecallStage('outcome');
     setStep(4);
     loadHomeAction();
@@ -622,11 +625,189 @@ function openOutcomeNext() {
   if (next) selectConcept(next.path);
 }
 
+function ensureOutcomeReflectionButton() {
+  if (document.getElementById('btn-outcome-reflection')) return;
+  const anchor = document.getElementById('btn-outcome-close');
+  if (!anchor) return;
+  const button = document.createElement('button');
+  button.id = 'btn-outcome-reflection';
+  button.className = 'btn btn-quiet';
+  button.type = 'button';
+  button.textContent = '保存这次心得';
+  anchor.before(button);
+  button.addEventListener('click', saveOutcomeReflection);
+}
+
+function saveOutcomeReflection() {
+  const outcome = latestOutcome?.outcome;
+  const session = latestOutcome?.session;
+  if (!outcome || !session) return;
+  const source = outcome.second_explanation || outcome.first_explanation || '';
+  reflectionDraft = {
+    content: source,
+    sessionId: session.id,
+    pagePath: session.page_path,
+    pageTitle: session.page_title,
+  };
+  closeRecall();
+  openHistory('reflections');
+}
+
 function closeRecall() {
   document.getElementById('recall-modal').classList.add('hidden');
 }
 
 let historyView = 'gaps';
+let reflectionDraft = null;
+
+function ensureReflectionTab() {
+  const tabs = document.querySelector('.history-tabs');
+  if (!tabs || tabs.querySelector('[data-history-view="reflections"]')) return;
+  const button = document.createElement('button');
+  button.className = 'history-tab';
+  button.type = 'button';
+  button.dataset.historyView = 'reflections';
+  button.setAttribute('role', 'tab');
+  button.setAttribute('aria-selected', 'false');
+  button.textContent = '学习心得';
+  tabs.append(button);
+  button.addEventListener('click', () => openHistory('reflections'));
+}
+
+function reflectionSourceLabel(source) {
+  return { manual: '手写心得', session: '学习后记录', summary: '阶段总结' }[source] || '学习心得';
+}
+
+function reflectionDraftValue() {
+  return reflectionDraft?.content || '';
+}
+
+function reflectionComposeMarkup() {
+  const linkedTitle = reflectionDraft?.pageTitle || state.selected?.title || '';
+  const canLink = Boolean(reflectionDraft?.pagePath || state.selected?.path);
+  return `
+    <section class="reflection-compose" aria-labelledby="reflection-compose-title">
+      <div class="reflection-compose-head"><div><p>把值得保留的理解写下来</p><h3 id="reflection-compose-title">新的学习心得</h3></div><span>仅保存在本机</span></div>
+      <textarea id="reflection-input" maxlength="10000" placeholder="例如：我原来把两个概念混在一起了。现在我能区分它们的边界，但还想用一个真实例子验证。">${esc(reflectionDraftValue())}</textarea>
+      <div class="reflection-compose-actions">
+        ${canLink ? `<label class="reflection-link"><input id="reflection-link-current" type="checkbox" checked> 关联「${esc(linkedTitle)}」</label>` : '<span class="reflection-link">未关联特定知识点</span>'}
+        <button id="btn-save-reflection" class="btn btn-primary" type="button">保存心得</button>
+      </div>
+    </section>`;
+}
+
+function reflectionItemMarkup(item) {
+  const canEdit = item.source !== 'summary';
+  const title = item.page_title || (item.source === 'summary' ? '阶段总结' : '未关联知识点');
+  return `
+    <article class="reflection-item" data-reflection-id="${item.id}">
+      <div class="reflection-item-head">
+        <label class="reflection-select"><input class="reflection-select-input" type="checkbox" value="${item.id}" aria-label="选择心得：${esc(title)}"><span aria-hidden="true"></span></label>
+        <div><p>${esc(title)}</p><small>${esc(reflectionSourceLabel(item.source))} · ${esc(item.created_at || '')}</small></div>
+        <span class="reflection-kind ${esc(item.source)}">${esc(reflectionSourceLabel(item.source))}</span>
+      </div>
+      <p class="reflection-content">${historyEscape(item.content)}</p>
+      ${canEdit ? `<details class="reflection-edit"><summary>编辑</summary><label class="sr-only" for="reflection-edit-${item.id}">编辑学习心得</label><textarea id="reflection-edit-${item.id}" class="reflection-edit-input" maxlength="10000">${esc(item.content)}</textarea><button class="btn btn-quiet btn-update-reflection" type="button">保存修改</button></details>` : ''}
+    </article>`;
+}
+
+async function renderReflections() {
+  const hint = document.getElementById('history-hint');
+  const content = document.getElementById('history-content');
+  hint.textContent = '正在读取本机保存的学习心得…';
+  content.innerHTML = '';
+  try {
+    const data = await api('/api/study/reflections?limit=100');
+    hint.textContent = data.reflections.length
+      ? '选中几条心得后可生成阶段总结。只有所选文本会用于 AI 总结。'
+      : '从一次学习后的想法开始。心得与学习笔记分开保存，便于以后回看与归纳。';
+    content.innerHTML = `${reflectionComposeMarkup()}
+      <div class="reflection-summary-actions">
+        <span id="reflection-selection-status">尚未选择心得</span>
+        <button id="btn-summarize-reflections" class="btn btn-quiet" type="button" disabled>生成阶段总结</button>
+      </div>
+      <section class="reflection-timeline" aria-label="学习心得时间线">${data.reflections.map(reflectionItemMarkup).join('') || '<p class="review-empty">还没有心得。完成学习后，把一个新的理解、一处疑问或下一步行动写下来。</p>'}</section>`;
+    playEntryMotion(content, 'view-enter');
+    if (reflectionDraft) setTimeout(() => document.getElementById('reflection-input')?.focus(), 0);
+  } catch (e) {
+    hint.textContent = `暂时无法读取学习心得：${e.message}`;
+  }
+}
+
+function selectedReflectionIds() {
+  return [...document.querySelectorAll('.reflection-select-input:checked')].map(input => Number(input.value));
+}
+
+function syncReflectionSelection() {
+  const ids = selectedReflectionIds();
+  const button = document.getElementById('btn-summarize-reflections');
+  const status = document.getElementById('reflection-selection-status');
+  if (button) button.disabled = !ids.length;
+  if (status) status.textContent = ids.length ? `已选择 ${ids.length} 条心得` : '尚未选择心得';
+}
+
+async function saveReflection() {
+  const input = document.getElementById('reflection-input');
+  const content = input?.value.trim() || '';
+  const button = document.getElementById('btn-save-reflection');
+  if (!content) { input?.focus(); return; }
+  const context = reflectionDraft || (state.selected ? { pagePath: state.selected.path, pageTitle: state.selected.title } : null);
+  const linked = document.getElementById('reflection-link-current')?.checked;
+  button.disabled = true;
+  button.textContent = '正在保存…';
+  try {
+    await api('/api/study/reflections', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content, page_path: linked ? context?.pagePath || null : null, session_id: linked ? reflectionDraft?.sessionId || null : null }),
+    });
+    reflectionDraft = null;
+    await renderReflections();
+  } catch (e) {
+    button.disabled = false;
+    button.textContent = '保存心得';
+    document.getElementById('history-hint').textContent = `未能保存心得：${e.message}`;
+  }
+}
+
+async function updateReflection(item) {
+  const input = item.querySelector('.reflection-edit-input');
+  const button = item.querySelector('.btn-update-reflection');
+  const content = input?.value.trim() || '';
+  if (!content) { input?.focus(); return; }
+  button.disabled = true;
+  button.textContent = '正在保存…';
+  try {
+    await api(`/api/study/reflections/${item.dataset.reflectionId}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }),
+    });
+    await renderReflections();
+  } catch (e) {
+    button.disabled = false;
+    button.textContent = '保存修改';
+    document.getElementById('history-hint').textContent = `未能保存修改：${e.message}`;
+  }
+}
+
+async function summarizeSelectedReflections() {
+  const ids = selectedReflectionIds();
+  const button = document.getElementById('btn-summarize-reflections');
+  if (!ids.length || !button) return;
+  button.disabled = true;
+  button.textContent = '正在整理…';
+  try {
+    const result = await api('/api/study/reflections/summary', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reflection_ids: ids }),
+    });
+    await renderReflections();
+    document.getElementById('history-hint').textContent = result.summary_source === 'llm'
+      ? '阶段总结已保存。它只依据你刚才选择的心得生成。'
+      : '阶段总结已保存为本地摘录。开启 AI 深度诊断后可生成更结构化的总结。';
+  } catch (e) {
+    button.disabled = false;
+    button.textContent = '生成阶段总结';
+    document.getElementById('history-hint').textContent = `未能生成阶段总结：${e.message}`;
+  }
+}
 
 function gapStatusText(status) {
   return { open: '待补充', revised: '已补充，待核对', verified: '已澄清' }[status] || status;
@@ -650,6 +831,10 @@ async function openHistory(view = 'gaps') {
   hint.textContent = '正在读取学习记录…';
   content.innerHTML = '';
   try {
+    if (view === 'reflections') {
+      await renderReflections();
+      return;
+    }
     if (view === 'sessions') {
       const data = await api('/api/study/history?limit=30');
       hint.textContent = data.sessions.length ? '每一轮讲解都会保留，可从待处理盲区继续学习。' : '还没有学习会话。完成一次回顾后，会在这里留下记录。';
@@ -846,7 +1031,7 @@ const GRAPH_DEFAULTS = {
   sections: [], notesOnly: false, showIsolated: true,
   scope: 'neighbors',
   statuses: { unread: true, reading: true, read: true },
-  colorMode: 'status', showLabels: true, labelOpacity: 0.78,
+  colorMode: 'status', showLabels: true, labelOpacity: 1,
   nodeSize: 1, linkWidth: 1, centerForce: 0.012,
 };
 let graphSettings = null;
@@ -900,6 +1085,7 @@ function initGraphSettings() {
     sections: Array.isArray(saved.sections) ? saved.sections.filter(s => graphSections().includes(s)) : defaults.sections,
     statuses: { ...defaults.statuses, ...(saved.statuses || {}) },
     scope: ['neighbors', 'two_hops', 'all'].includes(saved.scope) ? saved.scope : defaults.scope,
+    labelOpacity: Math.max(0.72, Number(saved.labelOpacity ?? defaults.labelOpacity)),
   };
 }
 
@@ -975,7 +1161,7 @@ function graphReason(node) {
 }
 
 function graphNodeLabel(node) {
-  return `${node.mastery?.label || '未接触'} · ${graphReason(node)}`;
+  return node.mastery?.label || '未接触';
 }
 
 function recommendedGraphNode() {
@@ -1064,7 +1250,7 @@ function renderGraphDecision() {
   button.dataset.path = candidate.id;
   list.innerHTML = G.nodes.slice().sort((a, b) => masteryRank(a) - masteryRank(b) || a.title.localeCompare(b.title, 'zh-Hans-CN')).map(node => `
     <button class="graph-node-option ${node.id === candidate.id ? 'active' : ''}" type="button" data-path="${esc(node.id)}">
-      <span>${esc(node.title)}</span><small>${esc(graphNodeLabel(node))}</small>
+      <span class="graph-node-option-title">${esc(node.title)}</span><small>${esc(graphNodeLabel(node))}</small>
     </button>`).join('');
   list.querySelectorAll('.graph-node-option').forEach(option => option.addEventListener('click', () => {
     G.selectedId = option.dataset.path;
@@ -1656,7 +1842,7 @@ async function importLearningFile(file) {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ payload }),
     });
     const incoming = preview.incoming;
-    const message = `将合并 ${incoming.sessions} 个会话、${incoming.notes} 条笔记和 ${incoming.cards} 张复习卡。当前记录不会被删除。确认导入吗？`;
+    const message = `将合并 ${incoming.sessions} 个会话、${incoming.notes} 条笔记、${incoming.reflections || 0} 条心得和 ${incoming.cards} 张复习卡。当前记录不会被删除。确认导入吗？`;
     if (!window.confirm(message)) { hint.textContent = '已取消导入。'; return; }
     const result = await api('/api/study/import', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ payload }),
@@ -1768,6 +1954,7 @@ document.getElementById('btn-save-recall').addEventListener('click', saveRecall)
 document.getElementById('btn-start-simplify').addEventListener('click', startSimplify);
 document.getElementById('btn-save-simplify').addEventListener('click', saveSimplify);
 document.getElementById('btn-outcome-next').addEventListener('click', openOutcomeNext);
+ensureOutcomeReflectionButton();
 document.getElementById('btn-outcome-close').addEventListener('click', closeRecall);
 document.getElementById('recall-modal').addEventListener('click', (e) => {
   if (e.target.id === 'recall-modal') closeRecall();
@@ -1806,11 +1993,18 @@ document.getElementById('history-modal').addEventListener('click', (e) => {
   if (e.target.id === 'history-modal') document.getElementById('history-modal').classList.add('hidden');
 });
 document.querySelectorAll('.history-tab').forEach(tab => tab.addEventListener('click', () => openHistory(tab.dataset.historyView)));
+ensureReflectionTab();
 document.getElementById('history-content').addEventListener('click', (e) => {
   const button = e.target.closest('.btn-save-gap');
   if (button) saveGapRevision(button.closest('.gap-item'));
   const relinkButton = e.target.closest('.btn-relink-page');
   if (relinkButton) relinkPage(relinkButton.closest('.orphan-item'));
+  if (e.target.closest('#btn-save-reflection')) saveReflection();
+  if (e.target.closest('.btn-update-reflection')) updateReflection(e.target.closest('.reflection-item'));
+  if (e.target.closest('#btn-summarize-reflections')) summarizeSelectedReflections();
+});
+document.getElementById('history-content').addEventListener('change', (e) => {
+  if (e.target.matches('.reflection-select-input')) syncReflectionSelection();
 });
 document.getElementById('btn-export-data').addEventListener('click', async () => {
   const button = document.getElementById('btn-export-data');
@@ -1913,6 +2107,7 @@ document.getElementById('graph-saved-views').addEventListener('change', (e) => {
   graphSettings = {
     ...graphSettings, ...view, sections: [...view.sections], statuses: { ...view.statuses },
     scope: ['neighbors', 'two_hops', 'all'].includes(view.scope) ? view.scope : GRAPH_DEFAULTS.scope,
+    labelOpacity: Math.max(0.72, Number(view.labelOpacity ?? graphSettings.labelOpacity)),
   };
   saveGraphSettings(); renderGraphSettings(); refreshGraphData(true);
 });
@@ -1948,7 +2143,7 @@ for (const [id, key, digits, redraw] of [
   ['graph-link-width', 'linkWidth', 2, true], ['graph-center-force', 'centerForce', 3, false],
 ]) {
   document.getElementById(id).addEventListener('input', (e) => {
-    graphSettings[key] = Number(e.target.value);
+    graphSettings[key] = key === 'labelOpacity' ? Math.max(0.72, Number(e.target.value)) : Number(e.target.value);
     document.getElementById(`${id}-value`).textContent = graphSettings[key].toFixed(digits);
     saveGraphSettings();
     if (redraw) renderGraph();

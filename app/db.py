@@ -33,6 +33,17 @@ CREATE TABLE IF NOT EXISTS notes (
     updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
+CREATE TABLE IF NOT EXISTS reflections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    page_path TEXT,
+    page_title TEXT,
+    session_id INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
+    source TEXT NOT NULL DEFAULT 'manual', -- manual | session | summary
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
 CREATE TABLE IF NOT EXISTS gaps (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -93,6 +104,9 @@ CREATE TABLE IF NOT EXISTS diagnosis_feedback (
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
 CREATE INDEX IF NOT EXISTS idx_notes_page_path ON notes(page_path);
+CREATE INDEX IF NOT EXISTS idx_reflections_created ON reflections(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_reflections_page_path ON reflections(page_path);
+CREATE INDEX IF NOT EXISTS idx_reflections_session ON reflections(session_id);
 CREATE INDEX IF NOT EXISTS idx_gaps_session ON gaps(session_id);
 CREATE INDEX IF NOT EXISTS idx_cards_due ON cards(due);
 CREATE INDEX IF NOT EXISTS idx_cards_session ON cards(session_id);

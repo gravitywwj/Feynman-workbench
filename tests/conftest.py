@@ -103,6 +103,8 @@ def wiki(tmp_path, monkeypatch):
     )
     (pages / "dashboard.md").write_text(DASHBOARD, encoding="utf-8")
     monkeypatch.setenv("FEYNMAN_WIKI_PATH", str(tmp_path))
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("FEYNMAN_LLM_MODEL", raising=False)
     monkeypatch.setattr("app.config.DATA_DIR", tmp_path / "data")
     monkeypatch.setattr("app.config.SETTINGS_PATH", tmp_path / "data" / "workspace-settings.json")
     monkeypatch.setattr("app.config.DB_PATH", tmp_path / "feynman.db")

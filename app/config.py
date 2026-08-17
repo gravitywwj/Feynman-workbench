@@ -5,7 +5,12 @@ import json
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 BASE_DIR = Path(__file__).resolve().parent.parent
+# Local-only convenience: environment variables supplied by a process still
+# take precedence, and .env remains ignored by Git.
+load_dotenv(BASE_DIR / ".env")
 DATA_DIR = Path(os.environ.get("FEYNMAN_DATA_DIR", BASE_DIR / "data"))
 DB_PATH = Path(os.environ.get("FEYNMAN_DB_PATH", DATA_DIR / "feynman.db"))
 STATIC_DIR = Path(__file__).resolve().parent / "static"

@@ -409,6 +409,105 @@ def save_note(page_path: str, content: str) -> dict:
     return get_note(page_path)
 
 
+def _reflection_by_id(reflection_id: int) -> dict:
+    with db.cursor() as cur:
+        row = cur.execute("SELECT * FROM reflections WHERE id = ?", (reflection_id,)).fetchone()
+    if not row:
+        raise LookupError("这条学习心得不存在或已被移除。")
+    return dict(row)
+
+
+def create_reflection(content: str, *, page_path: str | None = None, session_id: int | None = None) -> dict:
+    content = content.strip()
+    if not content:
+        raise ValueError("请写下心得后再保存。")
+    page_title = None
+    if page_path:
+        meta, _ = wiki_reader.render_page_html(page_path)
+        page_title = meta.get("title") or page_path.rsplit("/", 1)[-1].removesuffix(".md")
+    if session_id:
+        with db.cursor() as cur:
+            session = cur.execute("SELECT page_path, page_title FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        if not session:
+            raise LookupError("关联的学习会话不存在。")
+        if page_path and page_path != session["page_path"]:
+            raise ValueError("心得关联的知识点与学习会话不一致。")
+        page_path, page_title = session["page_path"], session["page_title"]
+    source = "session" if session_id else "manual"
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO reflections (page_path, page_title, session_id, source, content) VALUES (?, ?, ?, ?, ?)",
+            (page_path, page_title, session_id, source, content),
+        )
+        reflection_id = cur.lastrowid
+        if page_path:
+            cur.execute(
+                "INSERT INTO learning_events (event_type, page_path, entity_id) VALUES ('reflection_saved', ?, ?)",
+                (page_path, reflection_id),
+            )
+    return _reflection_by_id(reflection_id)
+
+
+def update_reflection(reflection_id: int, content: str) -> dict:
+    content = content.strip()
+    if not content:
+        raise ValueError("心得不能保存为空。")
+    with db.cursor() as cur:
+        existing = cur.execute("SELECT id FROM reflections WHERE id = ?", (reflection_id,)).fetchone()
+        if not existing:
+            raise LookupError("这条学习心得不存在或已被移除。")
+        cur.execute(
+            "UPDATE reflections SET content = ?, updated_at = datetime('now', 'localtime') WHERE id = ?",
+            (content, reflection_id),
+        )
+    return _reflection_by_id(reflection_id)
+
+
+def list_reflections(limit: int = 50, page_path: str | None = None) -> list[dict]:
+    sql = "SELECT * FROM reflections "
+    params: list[object] = []
+    if page_path:
+        sql += "WHERE page_path = ? "
+        params.append(page_path)
+    sql += "ORDER BY created_at DESC, id DESC LIMIT ?"
+    params.append(limit)
+    with db.cursor() as cur:
+        return db.rows_to_dicts(cur.execute(sql, params).fetchall())
+
+
+def create_reflection_summary(reflection_ids: list[int]) -> dict:
+    ids = list(dict.fromkeys(reflection_ids))
+    if not ids:
+        raise ValueError("请至少选择一条学习心得。")
+    placeholders = ", ".join("?" for _ in ids)
+    with db.cursor() as cur:
+        rows = cur.execute(
+            f"SELECT * FROM reflections WHERE id IN ({placeholders}) ORDER BY created_at ASC, id ASC", ids,
+        ).fetchall()
+    reflections = db.rows_to_dicts(rows)
+    if len(reflections) != len(ids):
+        raise LookupError("所选心得中有内容已不存在，请刷新后再试。")
+    content, source = tutor.summarize_reflections(reflections)
+    linked_paths = {item["page_path"] for item in reflections if item.get("page_path")}
+    page_path = next(iter(linked_paths)) if len(linked_paths) == 1 else None
+    page_title = next((item["page_title"] for item in reflections if item.get("page_title")), None)
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO reflections (page_path, page_title, source, content) VALUES (?, ?, 'summary', ?)",
+            (page_path, page_title if page_path else "阶段总结", content),
+        )
+        reflection_id = cur.lastrowid
+        if page_path:
+            cur.execute(
+                "INSERT INTO learning_events (event_type, page_path, entity_id) VALUES ('reflection_summary_saved', ?, ?)",
+                (page_path, reflection_id),
+            )
+    result = _reflection_by_id(reflection_id)
+    result["summary_source"] = source
+    result["source_reflection_ids"] = ids
+    return result
+
+
 def list_history(limit: int = 20, page_path: str | None = None) -> list[dict]:
     sql = (
         "SELECT sessions.*, COUNT(gaps.id) AS gap_total, "
@@ -480,10 +579,10 @@ def revise_gap(gap_id: int, revision: str) -> dict:
 
 def export_learning_data() -> dict:
     """导出工作台自身的学习记录，不包含或改写 Wiki 原文。"""
-    tables = ("notes", "sessions", "turns", "gaps", "cards", "reviews", "review_attempts", "learning_events", "diagnosis_feedback")
+    tables = ("notes", "reflections", "sessions", "turns", "gaps", "cards", "reviews", "review_attempts", "learning_events", "diagnosis_feedback")
     with db.cursor() as cur:
         payload = {table: db.rows_to_dicts(cur.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()) for table in tables}
-    return {"format": "feynman-workbench-export", "version": 1, "exported_at": datetime.now().isoformat(timespec="seconds"), **payload}
+    return {"format": "feynman-workbench-export", "version": 2, "exported_at": datetime.now().isoformat(timespec="seconds"), **payload}
 
 
 def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
@@ -495,13 +594,13 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
     """
     if payload.get("format") != "feynman-workbench-export":
         raise ValueError("这不是费曼学习工作台导出的学习数据")
-    if payload.get("version") != 1:
+    if payload.get("version") not in {1, 2}:
         raise ValueError("暂不支持该导出版本")
-    names = ("notes", "sessions", "turns", "gaps", "cards", "reviews", "review_attempts", "learning_events", "diagnosis_feedback")
+    names = ("notes", "reflections", "sessions", "turns", "gaps", "cards", "reviews", "review_attempts", "learning_events", "diagnosis_feedback")
     source = {name: payload.get(name, []) for name in names}
     if any(not isinstance(value, list) for value in source.values()):
         raise ValueError("导出数据的结构不正确")
-    counts = {"notes": 0, "sessions": 0, "cards": 0, "events": 0}
+    counts = {"notes": 0, "reflections": 0, "sessions": 0, "cards": 0, "events": 0}
     if dry_run:
         return {
             "dry_run": True,
@@ -550,6 +649,26 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
             session_map[old_id] = cur.lastrowid
             new_source_session_ids.add(old_id)
             counts["sessions"] += 1
+
+        for reflection in source["reflections"]:
+            content = str(reflection.get("content") or "").strip()[:10000]
+            created_at = str(reflection.get("created_at") or "")
+            if not content or not created_at:
+                continue
+            existing = cur.execute(
+                "SELECT 1 FROM reflections WHERE content = ? AND created_at = ?", (content, created_at),
+            ).fetchone()
+            if existing:
+                continue
+            old_session_id = reflection.get("session_id")
+            session_id = session_map.get(old_session_id) if isinstance(old_session_id, int) else None
+            cur.execute(
+                "INSERT INTO reflections (page_path, page_title, session_id, source, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (reflection.get("page_path"), reflection.get("page_title"), session_id,
+                 str(reflection.get("source") or "manual"), content, created_at,
+                 str(reflection.get("updated_at") or created_at)),
+            )
+            counts["reflections"] += 1
 
         card_map: dict[int, int] = {}
         for turn in source["turns"]:
@@ -671,11 +790,11 @@ def list_orphaned_records() -> list[dict]:
     """识别原 Wiki 中已不存在的页面路径，以便用户在重命名/移动后手动重新关联。"""
     with db.cursor() as cur:
         paths = cur.execute(
-            "SELECT page_path, MAX(page_title) AS page_title, MAX(updated_at) AS last_activity "
-            "FROM sessions GROUP BY page_path "
-            "UNION "
-            "SELECT notes.page_path, notes.page_path AS page_title, notes.updated_at AS last_activity "
-            "FROM notes WHERE page_path NOT IN (SELECT page_path FROM sessions)"
+            "SELECT page_path, MAX(page_title) AS page_title, MAX(last_activity) AS last_activity FROM ("
+            "SELECT page_path, page_title, updated_at AS last_activity FROM sessions "
+            "UNION ALL SELECT page_path, page_path AS page_title, updated_at AS last_activity FROM notes "
+            "UNION ALL SELECT page_path, page_title, updated_at AS last_activity FROM reflections WHERE page_path IS NOT NULL"
+            ") GROUP BY page_path"
         ).fetchall()
     orphaned = []
     for row in paths:
@@ -695,8 +814,9 @@ def relink_page(old_path: str, new_path: str) -> dict:
     title = meta.get("title") or new_path.rsplit("/", 1)[-1].removesuffix(".md")
     with db.cursor() as cur:
         has_records = cur.execute(
-            "SELECT EXISTS(SELECT 1 FROM sessions WHERE page_path = ?) OR EXISTS(SELECT 1 FROM notes WHERE page_path = ?)",
-            (old_path, old_path),
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE page_path = ?) OR EXISTS(SELECT 1 FROM notes WHERE page_path = ?) "
+            "OR EXISTS(SELECT 1 FROM reflections WHERE page_path = ?)",
+            (old_path, old_path, old_path),
         ).fetchone()[0]
         if not has_records:
             raise LookupError("旧页面没有可重新关联的学习记录。")
@@ -706,4 +826,5 @@ def relink_page(old_path: str, new_path: str) -> dict:
             raise ValueError("目标页面已有笔记，为避免覆盖，请先在学习记录中手动合并笔记。")
         cur.execute("UPDATE sessions SET page_path = ?, page_title = ?, concept = ? WHERE page_path = ?", (new_path, title, title, old_path))
         cur.execute("UPDATE notes SET page_path = ? WHERE page_path = ?", (new_path, old_path))
+        cur.execute("UPDATE reflections SET page_path = ?, page_title = ? WHERE page_path = ?", (new_path, title, old_path))
     return {"old_path": old_path, "new_path": new_path, "title": title}

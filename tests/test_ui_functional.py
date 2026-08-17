@@ -85,6 +85,16 @@ def test_reader_preferences_note_and_recall_flow(wiki):
         assert page.locator(".outcome-detail").evaluate("node => node.open")
         page.get_by_role("button", name="回到学习资料").click()
 
+        page.get_by_role("button", name="学习记录").click()
+        page.get_by_role("tab", name="学习心得").click()
+        page.locator("#reflection-input").fill("我现在会先分清检索目标、对象和约束，再判断问题是否足够明确。")
+        page.get_by_role("button", name="保存心得").click()
+        page.locator(".reflection-item").first.wait_for(state="visible")
+        page.locator(".reflection-select-input").first.check()
+        page.get_by_role("button", name="生成阶段总结").click()
+        page.locator(".reflection-item").filter(has_text="阶段总结").wait_for(state="visible")
+        page.get_by_role("button", name="关闭", exact=True).click()
+
         page.get_by_role("button", name="复习模块", exact=True).click()
         page.get_by_role("tab", name="突击检查").click()
         review = page.locator(".review-item").first
@@ -232,6 +242,7 @@ def test_first_run_demo_workspace_and_graph_list_are_actionable(wiki):
         page.get_by_role("button", name="知识图谱").click()
         page.locator("#graph-canvas svg").wait_for(state="visible")
         choice = page.locator(".graph-node-option").first
+        assert "尚未留下" not in choice.inner_text()
         choice.click()
         assert page.get_by_role("button", name="开始回忆表达").is_enabled()
         browser.close()

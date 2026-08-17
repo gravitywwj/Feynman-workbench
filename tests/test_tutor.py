@@ -9,6 +9,20 @@ def test_diagnose_uses_local_rules_without_key(monkeypatch):
     assert question
 
 
+def test_env_file_is_loaded_without_overriding_process_variables(tmp_path, monkeypatch):
+    import app.config as config
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("DEEPSEEK_API_KEY=from-file\n", encoding="utf-8")
+    monkeypatch.setattr(config, "BASE_DIR", tmp_path)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    config.load_dotenv(env_file)
+    assert config.get_llm_config()["api_key"] == "from-file"
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "from-process")
+    config.load_dotenv(env_file)
+    assert config.get_llm_config()["api_key"] == "from-process"
+
+
 def test_diagnose_falls_back_when_llm_call_fails(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     monkeypatch.setattr(tutor, "_call_llm", lambda *_: (_ for _ in ()).throw(RuntimeError("offline")))

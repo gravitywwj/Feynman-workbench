@@ -242,6 +242,31 @@ def diagnose(explanation: str, title: str, reference_html: str) -> tuple[list[di
         return gaps, question, "local"
 
 
+def summarize_reflections(reflections: list[dict]) -> tuple[str, str]:
+    """Summarize only the reflection text deliberately selected by the learner."""
+    entries = [str(item.get("content") or "").strip() for item in reflections]
+    entries = [entry for entry in entries if entry]
+    if not entries:
+        raise ValueError("Please select at least one reflection before summarizing.")
+    config = get_llm_config()
+    if config.get("mode") == "ai" and config.get("api_key"):
+        try:
+            result = _call_llm(config, [
+                {"role": "system", "content": "You summarize only the learner's selected reflections. Do not add external facts. Return up to three concise Chinese paragraphs covering formed understanding, open questions, and one next action."},
+                {"role": "user", "content": "\n\n".join(f"- {entry}" for entry in entries)[:18000]},
+            ]).strip()
+            if result:
+                return result[:3000], "llm"
+        except Exception:
+            pass
+    excerpts = [entry.replace("\n", " ")[:180] for entry in entries[:3]]
+    result = "学习心得摘录：\n" + "\n".join(f"• {entry}" for entry in excerpts)
+    if len(entries) > 3:
+        result += f"\n另有 {len(entries) - 3} 条心得待你继续归纳。"
+    result += "\n\n这是基于已选心得的本地摘录。开启 AI 深度诊断后，可生成更结构化的阶段总结。"
+    return result[:3000], "local"
+
+
 def assess_gap_revision(revision: str, gap_content: str, title: str, reference_html: str) -> tuple[str, str, str]:
     """核对用户对单个盲区的补充。离线模式只记录为已补充，避免伪造“已验证”。"""
     config = get_llm_config()

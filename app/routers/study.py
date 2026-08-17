@@ -23,6 +23,20 @@ class NoteSave(BaseModel):
     content: str = Field(max_length=10000)
 
 
+class ReflectionCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=10000)
+    page_path: str | None = Field(default=None, max_length=2000)
+    session_id: int | None = Field(default=None, ge=1)
+
+
+class ReflectionUpdate(BaseModel):
+    content: str = Field(min_length=1, max_length=10000)
+
+
+class ReflectionSummaryCreate(BaseModel):
+    reflection_ids: list[int] = Field(min_length=1, max_length=50)
+
+
 class ReviewCreate(BaseModel):
     rating: str
 
@@ -161,6 +175,43 @@ def put_note(payload: NoteSave, page_path: str = Query(...)) -> dict:
         return study_sessions.save_note(page_path, payload.content)
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/reflections")
+def reflections(limit: int = Query(50, ge=1, le=100), page_path: str | None = Query(None)) -> dict:
+    return {"reflections": study_sessions.list_reflections(limit, page_path)}
+
+
+@router.post("/reflections")
+def create_reflection(payload: ReflectionCreate) -> dict:
+    try:
+        return study_sessions.create_reflection(
+            payload.content, page_path=payload.page_path, session_id=payload.session_id,
+        )
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.put("/reflections/{reflection_id}")
+def update_reflection(reflection_id: int, payload: ReflectionUpdate) -> dict:
+    try:
+        return study_sessions.update_reflection(reflection_id, payload.content)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/reflections/summary")
+def create_reflection_summary(payload: ReflectionSummaryCreate) -> dict:
+    try:
+        return study_sessions.create_reflection_summary(payload.reflection_ids)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.get("/reviews/due")

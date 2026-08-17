@@ -165,6 +165,44 @@ def test_note_round_trip(wiki):
     assert fetched.json()["content"] == "需要比较改写前后召回率。"
 
 
+def test_reflections_are_timestamped_exported_and_can_be_summarized(wiki):
+    created = client.post("/api/study/sessions", json={
+        "page_path": PAGE,
+        "explanation": "查询改写需要补足对象、场景和约束条件，才能让检索返回更贴近真实任务的资料。例如将模糊问题改成带有用户目标和上下文的查询。",
+    }).json()
+    reflection = client.post("/api/study/reflections", json={
+        "content": "我原来只记得补关键词，现在理解了对象和场景也会改变检索结果。下次要用一个实际问题验证。",
+        "page_path": PAGE,
+        "session_id": created["session"]["id"],
+    })
+    assert reflection.status_code == 200
+    assert reflection.json()["source"] == "session"
+    assert reflection.json()["page_path"] == PAGE
+
+    listed = client.get("/api/study/reflections")
+    assert listed.status_code == 200
+    assert listed.json()["reflections"][0]["content"].startswith("我原来只记得")
+
+    updated = client.put(f"/api/study/reflections/{reflection.json()['id']}", json={
+        "content": "我现在理解对象、场景和约束都会影响检索结果。下次要用一个实际问题验证。",
+    })
+    assert updated.status_code == 200
+    assert updated.json()["content"].startswith("我现在理解")
+
+    summary = client.post("/api/study/reflections/summary", json={"reflection_ids": [reflection.json()["id"]]})
+    assert summary.status_code == 200
+    assert summary.json()["source"] == "summary"
+    assert summary.json()["summary_source"] in {"local", "llm"}
+
+    exported = client.get("/api/study/export").json()
+    assert exported["version"] == 2
+    assert len(exported["reflections"]) == 2
+    assert exported["reflections"][0]["session_id"] == created["session"]["id"]
+    preview = client.post("/api/study/import/preview", json={"payload": exported})
+    assert preview.status_code == 200
+    assert preview.json()["incoming"]["reflections"] == 2
+
+
 def test_due_card_can_be_reviewed(wiki):
     created = client.post("/api/study/sessions", json={
         "page_path": PAGE,
@@ -248,6 +286,7 @@ def test_gap_revision_validation_and_missing_gap(wiki):
 
 def test_export_and_relink_orphaned_records(wiki):
     client.put("/api/study/notes", params={"page_path": PAGE}, json={"content": "需要在项目里继续验证。"})
+    client.post("/api/study/reflections", json={"content": "这条心得也应跟随知识点的新路径。", "page_path": PAGE})
     original = wiki / "pages" / "AI" / "rag" / "query-rewriting.md"
     moved = wiki / "pages" / "AI" / "rag" / "query-rewriting-moved.md"
     original.rename(moved)
@@ -261,6 +300,7 @@ def test_export_and_relink_orphaned_records(wiki):
     assert relink.status_code == 200
     assert relink.json()["new_path"].endswith("moved.md")
     assert client.get("/api/study/orphans").json()["orphans"] == []
+    assert client.get("/api/study/reflections").json()["reflections"][0]["page_path"].endswith("moved.md")
     exported = client.get("/api/study/export")
     assert exported.status_code == 200
     assert exported.json()["format"] == "feynman-workbench-export"
