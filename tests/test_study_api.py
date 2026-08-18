@@ -111,6 +111,90 @@ def test_workspace_preview_and_demo_setup_activate_a_first_run_experience(wiki):
     assert settings.json()["learning_goal"] == "long_term"
 
 
+def test_local_llm_profiles_override_environment_fallback_and_can_switch(wiki, monkeypatch):
+    initial = client.get("/api/study/llm-settings")
+    assert initial.status_code == 200
+    assert initial.json()["configured"] is False
+    assert "api_key" not in initial.json()
+    assert client.post("/api/study/llm-settings/test").status_code == 400
+
+    saved = client.put("/api/study/llm-settings", json={
+        "api_key": "local-test-secret-1234",
+        "base_url": "http://127.0.0.1:11434/v1/",
+        "model": "example-local-model",
+        "profile_name": "本地模型",
+        "profile_id": None,
+    })
+    assert saved.status_code == 200
+    assert saved.json()["configured"] is True
+    assert saved.json()["source"] == "local"
+    assert saved.json()["active_profile_name"] == "本地模型"
+    assert saved.json()["api_key_masked"] != "local-test-secret-1234"
+    assert saved.json()["base_url"] == "http://127.0.0.1:11434/v1"
+
+    from app import config
+    assert config.get_llm_config()["api_key"] == "local-test-secret-1234"
+    first_id = saved.json()["active_profile_id"]
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "environment-fallback-key")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://fallback.example/v1")
+    monkeypatch.setenv("FEYNMAN_LLM_MODEL", "fallback-model")
+    assert config.get_llm_config()["api_key"] == "local-test-secret-1234"
+
+    second = client.put("/api/study/llm-settings", json={
+        "api_key": "second-test-secret-5678",
+        "base_url": "https://example.test/v1",
+        "model": "example-cloud-model",
+        "profile_name": "云端模型",
+        "profile_id": None,
+    })
+    assert second.status_code == 200
+    assert second.json()["active_profile_name"] == "云端模型"
+    assert len(second.json()["profiles"]) == 2
+
+    activated = client.post(f"/api/study/llm-settings/{first_id}/activate")
+    assert activated.status_code == 200
+    assert activated.json()["active_profile_name"] == "本地模型"
+    assert config.get_llm_config()["api_key"] == "local-test-secret-1234"
+
+    removed = client.delete(f"/api/study/llm-settings/{first_id}")
+    assert removed.status_code == 200
+    assert removed.json()["active_profile_name"] == "云端模型"
+    assert config.get_llm_config()["api_key"] == "second-test-secret-5678"
+    second_id = removed.json()["active_profile_id"]
+    fallback = client.delete(f"/api/study/llm-settings/{second_id}")
+    assert fallback.status_code == 200
+    assert fallback.json()["source"] == "environment"
+    assert config.get_llm_config()["api_key"] == "environment-fallback-key"
+
+
+def test_llm_connection_result_is_saved_on_the_active_profile(wiki, monkeypatch):
+    saved = client.put("/api/study/llm-settings", json={
+        "api_key": "profile-test-secret",
+        "base_url": "https://example.test/v1",
+        "model": "example-model",
+        "profile_name": "可测试连接",
+        "profile_id": None,
+    })
+    assert saved.status_code == 200
+
+    import openai
+
+    class FakeCompletions:
+        @staticmethod
+        def create(**_): return object()
+
+    class FakeOpenAI:
+        def __init__(self, **_): self.chat = type("Chat", (), {"completions": FakeCompletions()})()
+
+    monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
+    checked = client.post("/api/study/llm-settings/test")
+    assert checked.status_code == 200
+    assert checked.json()["ok"] is True
+    profile = client.get("/api/study/llm-settings").json()["profiles"][0]
+    assert profile["last_test"]["ok"] is True
+    assert profile["last_test"]["tested_at"]
+
+
 def test_folder_picker_can_be_cancelled_without_touching_workspace(wiki, monkeypatch):
     class FakeRoot:
         def withdraw(self): pass
@@ -165,6 +249,57 @@ def test_note_round_trip(wiki):
     assert fetched.json()["content"] == "需要比较改写前后召回率。"
 
 
+def test_recall_brief_uses_selected_persona_and_local_learning_evidence(wiki):
+    client.put("/api/study/notes", params={"page_path": PAGE}, json={
+        "content": "我知道改写要补关键词，但还不确定什么时候应该补场景与约束。",
+    })
+    created = client.post("/api/study/sessions", json={
+        "page_path": PAGE,
+        "explanation": "查询改写会让问题更清楚，但我还没有说明它如何改变检索结果。",
+    })
+    assert created.status_code == 200
+    response = client.post("/api/study/recall-brief", json={"page_path": PAGE, "persona": "direct"})
+    assert response.status_code == 200
+    brief = response.json()
+    assert brief["persona"] == "direct"
+    assert brief["persona_label"] == "直率追问"
+    assert brief["question"]
+    assert len(brief["follow_ups"]) >= 2
+    assert brief["source"] == "local"
+
+
+def test_knowledge_update_requires_review_then_supports_safe_undo(wiki):
+    source = wiki / "pages" / "AI" / "rag" / "query-rewriting.md"
+    before = source.read_text(encoding="utf-8")
+    created = client.post("/api/study/knowledge-updates", json={
+        "page_path": PAGE,
+        "persona": "reflective",
+        "content": "我发现查询改写不只是补关键词，还要补足对象、场景和约束；下次要比较改写前后的召回结果。",
+    })
+    assert created.status_code == 200
+    draft = created.json()
+    assert draft["status"] == "draft"
+    assert draft["persona"] == "reflective"
+    assert draft["evidence"]
+    assert source.read_text(encoding="utf-8") == before
+
+    applied = client.post(f"/api/study/knowledge-updates/{draft['id']}/apply", json={
+        "target_mode": "append_current",
+        "proposal": "- 学习记录：改写前后应比较召回结果，并说明对象、场景与约束。",
+        "proposed_title": "",
+    })
+    assert applied.status_code == 200
+    assert applied.json()["status"] == "applied"
+    written = source.read_text(encoding="utf-8")
+    assert "## 学习增量" in written
+    assert f"feynman-workbench:update:{draft['id']}" in written
+
+    undone = client.post(f"/api/study/knowledge-updates/{draft['id']}/undo")
+    assert undone.status_code == 200
+    assert undone.json()["status"] == "undone"
+    assert source.read_text(encoding="utf-8") == before
+
+
 def test_reflections_are_timestamped_exported_and_can_be_summarized(wiki):
     created = client.post("/api/study/sessions", json={
         "page_path": PAGE,
@@ -195,7 +330,7 @@ def test_reflections_are_timestamped_exported_and_can_be_summarized(wiki):
     assert summary.json()["summary_source"] in {"local", "llm"}
 
     exported = client.get("/api/study/export").json()
-    assert exported["version"] == 2
+    assert exported["version"] == 3
     assert len(exported["reflections"]) == 2
     assert exported["reflections"][0]["session_id"] == created["session"]["id"]
     preview = client.post("/api/study/import/preview", json={"payload": exported})
