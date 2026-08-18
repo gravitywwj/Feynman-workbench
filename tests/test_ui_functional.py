@@ -106,6 +106,7 @@ def test_reader_preferences_note_and_recall_flow(wiki):
 
         page.get_by_role("button", name="学习记录").click()
         assert page.get_by_role("tab", name="待处理盲区").get_attribute("aria-selected") == "true"
+        page.locator("#history-content > *").first.wait_for(state="visible")
         assert page.locator("#history-content").is_visible()
 
         page.reload(wait_until="networkidle")
@@ -135,7 +136,9 @@ def test_mobile_primary_action_is_not_clipped(wiki):
         page.get_by_role("button", name="开始回忆表达").wait_for(state="visible")
         page.get_by_role("button", name="切换知识点").click()
         assert "mobile-open" in (page.locator("#concept-panel").get_attribute("class") or "")
-        page.locator("#concept-drawer-backdrop").click(position={"x": 4, "y": 4})
+        backdrop = page.locator("#concept-drawer-backdrop").bounding_box()
+        assert backdrop is not None
+        page.mouse.click(backdrop["x"] + backdrop["width"] - 4, backdrop["y"] + 4)
         assert "mobile-open" not in (page.locator("#concept-panel").get_attribute("class") or "")
         action = page.get_by_role("button", name="开始回忆表达")
         action_box = action.bounding_box()
