@@ -12,6 +12,7 @@ class SessionCreate(BaseModel):
     page_path: str
     explanation: str = Field(min_length=1, max_length=10000)
     elapsed_seconds: int = Field(default=0, ge=0, le=86400)
+    persona: str = Field(default="feynman", pattern="^(feynman|direct|exam|reflective)$")
 
 
 class SessionSimplify(BaseModel):
@@ -21,6 +22,23 @@ class SessionSimplify(BaseModel):
 
 class NoteSave(BaseModel):
     content: str = Field(max_length=10000)
+
+
+class RecallBriefCreate(BaseModel):
+    page_path: str
+    persona: str = Field(default="feynman", pattern="^(feynman|direct|exam|reflective)$")
+
+
+class KnowledgeUpdateCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=10000)
+    page_path: str
+    persona: str = Field(default="feynman", pattern="^(feynman|direct|exam|reflective)$")
+
+
+class KnowledgeUpdateApply(BaseModel):
+    target_mode: str = Field(pattern="^(append_current|create_idea|keep_local)$")
+    proposal: str = Field(min_length=1, max_length=5000)
+    proposed_title: str = Field(default="", max_length=120)
 
 
 class ReflectionCreate(BaseModel):
@@ -68,6 +86,14 @@ class WorkspaceSettingsSave(BaseModel):
     learning_goal: str = Field(default="long_term", pattern="^(exam|presentation|long_term)$")
 
 
+class LLMSettingsSave(BaseModel):
+    api_key: str = Field(default="", max_length=1000)
+    base_url: str = Field(min_length=1, max_length=2000)
+    model: str = Field(min_length=1, max_length=160)
+    profile_name: str = Field(default="", max_length=60)
+    profile_id: str | None = Field(default=None, max_length=64)
+
+
 class LearningImport(BaseModel):
     payload: dict
 
@@ -75,7 +101,7 @@ class LearningImport(BaseModel):
 @router.post("/sessions")
 def create_session(payload: SessionCreate) -> dict:
     try:
-        return study_sessions.create_session(payload.page_path, payload.explanation, payload.elapsed_seconds)
+        return study_sessions.create_session(payload.page_path, payload.explanation, payload.elapsed_seconds, payload.persona)
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -161,6 +187,43 @@ def put_workspace_settings(payload: WorkspaceSettingsSave) -> dict:
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.get("/llm-settings")
+def llm_settings() -> dict:
+    return config.get_llm_settings()
+
+
+@router.put("/llm-settings")
+def put_llm_settings(payload: LLMSettingsSave) -> dict:
+    try:
+        return config.save_llm_settings(**payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/llm-settings/test")
+def test_llm_settings() -> dict:
+    try:
+        return config.test_llm_connection()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/llm-settings/{profile_id}/activate")
+def activate_llm_settings(profile_id: str) -> dict:
+    try:
+        return config.activate_llm_profile(profile_id)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.delete("/llm-settings/{profile_id}")
+def delete_llm_settings(profile_id: str) -> dict:
+    try:
+        return config.delete_llm_profile(profile_id)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
 @router.get("/notes")
 def get_note(page_path: str = Query(...)) -> dict:
     try:
@@ -175,6 +238,49 @@ def put_note(payload: NoteSave, page_path: str = Query(...)) -> dict:
         return study_sessions.save_note(page_path, payload.content)
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/recall-brief")
+def recall_brief(payload: RecallBriefCreate) -> dict:
+    try:
+        return study_sessions.build_recall_brief(payload.page_path, payload.persona)
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/knowledge-updates")
+def knowledge_updates(limit: int = Query(50, ge=1, le=100), page_path: str | None = Query(None)) -> dict:
+    return {"updates": study_sessions.list_knowledge_updates(limit, page_path)}
+
+
+@router.post("/knowledge-updates")
+def create_knowledge_update(payload: KnowledgeUpdateCreate) -> dict:
+    try:
+        return study_sessions.create_knowledge_update(payload.content, payload.page_path, payload.persona)
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/knowledge-updates/{update_id}/apply")
+def apply_knowledge_update(update_id: int, payload: KnowledgeUpdateApply) -> dict:
+    try:
+        return study_sessions.apply_knowledge_update(
+            update_id, target_mode=payload.target_mode, proposal=payload.proposal, proposed_title=payload.proposed_title,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/knowledge-updates/{update_id}/undo")
+def undo_knowledge_update(update_id: int) -> dict:
+    try:
+        return study_sessions.undo_knowledge_update(update_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.get("/reflections")

@@ -6,9 +6,11 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import date, datetime, timedelta
+import json
+from pathlib import Path
 
 from app import config, db
-from app.services import mastery, review_coach, review_schedule, tutor, wiki_reader
+from app.services import mastery, review_coach, review_schedule, tutor, wiki_reader, wiki_writer
 
 MIN_EXPLANATION_LENGTH = 24
 
@@ -16,6 +18,30 @@ MIN_EXPLANATION_LENGTH = 24
 def _validate_page(path: str) -> dict:
     meta, _ = wiki_reader.render_page_html(path)
     return meta
+
+
+def build_recall_brief(page_path: str, persona: str = "feynman") -> dict:
+    """Build the first recall prompt from the selected page and learner evidence."""
+    meta, reference = wiki_reader.read_page_markdown(page_path)
+    title = meta.get("title") or page_path.rsplit("/", 1)[-1].removesuffix(".md")
+    with db.cursor() as cur:
+        note_row = cur.execute("SELECT content FROM notes WHERE page_path = ?", (page_path,)).fetchone()
+        gap_rows = cur.execute(
+            "SELECT gaps.content FROM gaps JOIN sessions ON sessions.id = gaps.session_id "
+            "WHERE sessions.page_path = ? AND gaps.status != 'verified' ORDER BY gaps.id DESC LIMIT 3",
+            (page_path,),
+        ).fetchall()
+        reflection_rows = cur.execute(
+            "SELECT content FROM reflections WHERE page_path = ? ORDER BY id DESC LIMIT 2", (page_path,)
+        ).fetchall()
+    return tutor.build_recall_brief(
+        title=title,
+        reference=reference,
+        note=(note_row["content"] if note_row else ""),
+        gaps=[row["content"] for row in gap_rows],
+        reflections=[row["content"] for row in reflection_rows],
+        persona=persona,
+    )
 
 
 def _cards_for(title: str, explanation: str, gaps: list[dict]) -> list[dict]:
@@ -31,13 +57,13 @@ def _cards_for(title: str, explanation: str, gaps: list[dict]) -> list[dict]:
     return cards
 
 
-def create_session(page_path: str, explanation: str, elapsed_seconds: int = 0) -> dict:
+def create_session(page_path: str, explanation: str, elapsed_seconds: int = 0, persona: str = "feynman") -> dict:
     """创建一轮讲解会话，并保存本地诊断、追问和初始复习卡。"""
     if not explanation or len(explanation.strip()) < MIN_EXPLANATION_LENGTH:
         raise ValueError(f"请至少写 {MIN_EXPLANATION_LENGTH} 个字符，再开始诊断。")
     meta, reference_html = wiki_reader.render_page_html(page_path)
     title = meta.get("title") or page_path.rsplit("/", 1)[-1].removesuffix(".md")
-    gaps, question, diagnosis_source = tutor.diagnose(explanation, title, reference_html)
+    gaps, question, diagnosis_source = tutor.diagnose(explanation, title, reference_html, persona)
     today = date.today()
     with db.cursor() as cur:
         cur.execute(
@@ -409,6 +435,177 @@ def save_note(page_path: str, content: str) -> dict:
     return get_note(page_path)
 
 
+def _decode_json(value: str, fallback):
+    try:
+        decoded = json.loads(value)
+        return decoded if isinstance(decoded, type(fallback)) else fallback
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return fallback
+
+
+def _knowledge_update_payload(row, revision=None) -> dict:
+    item = dict(row)
+    item["analysis"] = _decode_json(item.pop("analysis_json"), {})
+    item["evidence"] = _decode_json(item.pop("evidence_json"), [])
+    item["revision"] = dict(revision) if revision else None
+    return item
+
+
+def _knowledge_update_row(update_id: int):
+    with db.cursor() as cur:
+        row = cur.execute("SELECT * FROM knowledge_updates WHERE id = ?", (update_id,)).fetchone()
+    if not row:
+        raise LookupError("知识库更新草案不存在")
+    return row
+
+
+def _current_page_evidence(page_path: str, title: str) -> dict:
+    _, body = wiki_reader.read_page_markdown(page_path)
+    return {
+        "path": page_path,
+        "title": title,
+        "section": page_path.split("/", 1)[0] if "/" in page_path else "",
+        "excerpt": " ".join(body.split())[:320],
+        "matched_terms": ["当前学习页"],
+    }
+
+
+def create_knowledge_update(content: str, page_path: str, persona: str = "feynman") -> dict:
+    """Analyze one learner note and persist an editable, not-yet-written proposal."""
+    note = content.strip()
+    if len(note) < 4:
+        raise ValueError("请先写下一条具体的理解、疑问或想法，再让 Agent 整理。")
+    meta = _validate_page(page_path)
+    title = meta.get("title") or page_path.rsplit("/", 1)[-1].removesuffix(".md")
+    evidence = wiki_reader.search_wiki(note, limit=5)
+    if not any(item["path"] == page_path for item in evidence):
+        evidence.insert(0, _current_page_evidence(page_path, title))
+    analysis = tutor.analyze_knowledge_note(note=note, title=title, evidence=evidence, persona=persona)
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO knowledge_updates (page_path, page_title, persona, source_content, analysis_json, evidence_json, proposal, proposed_title) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                page_path, title, tutor.normalize_persona(persona), note,
+                json.dumps({key: value for key, value in analysis.items() if key not in {"proposal", "proposed_title"}}, ensure_ascii=False),
+                json.dumps(evidence, ensure_ascii=False), analysis["proposal"], analysis["proposed_title"],
+            ),
+        )
+        update_id = cur.lastrowid
+    return get_knowledge_update(update_id)
+
+
+def get_knowledge_update(update_id: int) -> dict:
+    row = _knowledge_update_row(update_id)
+    with db.cursor() as cur:
+        revision = cur.execute(
+            "SELECT id, page_path, created_page, created_at, undone_at FROM wiki_revisions "
+            "WHERE knowledge_update_id = ? ORDER BY id DESC LIMIT 1", (update_id,)
+        ).fetchone()
+    return _knowledge_update_payload(row, revision)
+
+
+def list_knowledge_updates(limit: int = 50, page_path: str | None = None) -> list[dict]:
+    where = "WHERE page_path = ?" if page_path else ""
+    params = (page_path, limit) if page_path else (limit,)
+    with db.cursor() as cur:
+        rows = cur.execute(
+            f"SELECT * FROM knowledge_updates {where} ORDER BY id DESC LIMIT ?", params
+        ).fetchall()
+        revisions = {
+            row["knowledge_update_id"]: row
+            for row in cur.execute(
+                "SELECT r.id, r.knowledge_update_id, r.page_path, r.created_page, r.created_at, r.undone_at "
+                "FROM wiki_revisions r WHERE r.id IN (SELECT MAX(id) FROM wiki_revisions GROUP BY knowledge_update_id)"
+            ).fetchall()
+        }
+    return [_knowledge_update_payload(row, revisions.get(row["id"])) for row in rows]
+
+
+def apply_knowledge_update(
+    update_id: int, *, target_mode: str, proposal: str, proposed_title: str = "",
+) -> dict:
+    """Apply an approved proposal with a full pre-write snapshot for later undo."""
+    if target_mode not in {"append_current", "create_idea", "keep_local"}:
+        raise ValueError("不支持的知识库写入方式")
+    clean_proposal = proposal.strip()
+    if not clean_proposal:
+        raise ValueError("请先保留或编辑草案内容，再确认操作。")
+    row = _knowledge_update_row(update_id)
+    if row["status"] != "draft":
+        raise ValueError("这条草案已经处理，不能重复写入。")
+    title = proposed_title.strip()[:120] or row["proposed_title"] or f"关于{row['page_title']}的学习想法"
+    if target_mode == "keep_local":
+        with db.cursor() as cur:
+            cur.execute(
+                "UPDATE knowledge_updates SET proposal = ?, proposed_title = ?, target_mode = ?, status = 'kept_local', "
+                "updated_at = datetime('now', 'localtime') WHERE id = ?",
+                (clean_proposal, title, target_mode, update_id),
+            )
+        return get_knowledge_update(update_id)
+    if target_mode == "append_current":
+        change = wiki_writer.append_learning_update(row["page_path"], clean_proposal, update_id)
+    else:
+        change = wiki_writer.create_linked_idea_page(row["page_path"], title, clean_proposal, update_id)
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO wiki_revisions (knowledge_update_id, page_path, before_content, after_content, created_page) VALUES (?, ?, ?, ?, ?)",
+                (update_id, change["path"], change["before_content"], change["after_content"], int(change["created_page"])),
+            )
+            revision_id = cur.lastrowid
+            cur.execute(
+                "UPDATE knowledge_updates SET proposal = ?, proposed_title = ?, target_mode = ?, target_path = ?, status = 'applied', "
+                "updated_at = datetime('now', 'localtime') WHERE id = ?",
+                (clean_proposal, title, target_mode, change["path"], update_id),
+            )
+            cur.execute(
+                "INSERT INTO learning_events (event_type, page_path, entity_id) VALUES ('knowledge_update_applied', ?, ?)",
+                (change["path"], revision_id),
+            )
+    except Exception:
+        # Filesystem succeeded but database bookkeeping did not: immediately try to
+        # restore the exact snapshot so no untracked Wiki edit is left behind.
+        try:
+            wiki_writer.restore_revision(
+                change["path"], change["before_content"], change["after_content"],
+                created_page=bool(change["created_page"]),
+            )
+        except (FileNotFoundError, ValueError, OSError):
+            pass
+        raise
+    return get_knowledge_update(update_id)
+
+
+def undo_knowledge_update(update_id: int) -> dict:
+    """Restore the exact pre-write snapshot when no later edit conflicts with it."""
+    row = _knowledge_update_row(update_id)
+    if row["status"] != "applied":
+        raise ValueError("只有已写入 Wiki 的草案可以撤销。")
+    with db.cursor() as cur:
+        revision = cur.execute(
+            "SELECT * FROM wiki_revisions WHERE knowledge_update_id = ? AND undone_at IS NULL ORDER BY id DESC LIMIT 1",
+            (update_id,),
+        ).fetchone()
+    if not revision:
+        raise LookupError("没有可撤销的 Wiki 快照")
+    wiki_writer.restore_revision(
+        revision["page_path"], revision["before_content"], revision["after_content"],
+        created_page=bool(revision["created_page"]),
+    )
+    with db.cursor() as cur:
+        cur.execute("UPDATE wiki_revisions SET undone_at = datetime('now', 'localtime') WHERE id = ?", (revision["id"],))
+        cur.execute(
+            "UPDATE knowledge_updates SET status = 'undone', updated_at = datetime('now', 'localtime') WHERE id = ?",
+            (update_id,),
+        )
+        cur.execute(
+            "INSERT INTO learning_events (event_type, page_path, entity_id) VALUES ('knowledge_update_undone', ?, ?)",
+            (revision["page_path"], revision["id"]),
+        )
+    return get_knowledge_update(update_id)
+
+
 def _reflection_by_id(reflection_id: int) -> dict:
     with db.cursor() as cur:
         row = cur.execute("SELECT * FROM reflections WHERE id = ?", (reflection_id,)).fetchone()
@@ -578,11 +775,15 @@ def revise_gap(gap_id: int, revision: str) -> dict:
 
 
 def export_learning_data() -> dict:
-    """导出工作台自身的学习记录，不包含或改写 Wiki 原文。"""
-    tables = ("notes", "reflections", "sessions", "turns", "gaps", "cards", "reviews", "review_attempts", "learning_events", "diagnosis_feedback")
+    """导出工作台学习记录与已确认写入的安全回档快照，不改写 Wiki 原文。"""
+    tables = (
+        "notes", "reflections", "sessions", "turns", "gaps", "cards", "reviews",
+        "review_attempts", "learning_events", "diagnosis_feedback", "knowledge_updates",
+        "wiki_revisions",
+    )
     with db.cursor() as cur:
         payload = {table: db.rows_to_dicts(cur.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()) for table in tables}
-    return {"format": "feynman-workbench-export", "version": 2, "exported_at": datetime.now().isoformat(timespec="seconds"), **payload}
+    return {"format": "feynman-workbench-export", "version": 3, "exported_at": datetime.now().isoformat(timespec="seconds"), **payload}
 
 
 def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
@@ -594,13 +795,20 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
     """
     if payload.get("format") != "feynman-workbench-export":
         raise ValueError("这不是费曼学习工作台导出的学习数据")
-    if payload.get("version") not in {1, 2}:
+    if payload.get("version") not in {1, 2, 3}:
         raise ValueError("暂不支持该导出版本")
-    names = ("notes", "reflections", "sessions", "turns", "gaps", "cards", "reviews", "review_attempts", "learning_events", "diagnosis_feedback")
+    names = (
+        "notes", "reflections", "sessions", "turns", "gaps", "cards", "reviews",
+        "review_attempts", "learning_events", "diagnosis_feedback", "knowledge_updates",
+        "wiki_revisions",
+    )
     source = {name: payload.get(name, []) for name in names}
     if any(not isinstance(value, list) for value in source.values()):
         raise ValueError("导出数据的结构不正确")
-    counts = {"notes": 0, "reflections": 0, "sessions": 0, "cards": 0, "events": 0}
+    counts = {
+        "notes": 0, "reflections": 0, "sessions": 0, "cards": 0, "events": 0,
+        "knowledge_updates": 0, "wiki_revisions": 0,
+    }
     if dry_run:
         return {
             "dry_run": True,
@@ -731,6 +939,64 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
             verdict = str(feedback.get("verdict") or "")
             if new_session and verdict in {"helpful", "disputed"}:
                 cur.execute("INSERT INTO diagnosis_feedback (session_id, verdict) VALUES (?, ?)", (new_session, verdict))
+        update_map: dict[int, int] = {}
+        for update in source["knowledge_updates"]:
+            old_id = update.get("id")
+            page_path = str(update.get("page_path") or "")
+            source_content = str(update.get("source_content") or "").strip()[:10000]
+            created_at = str(update.get("created_at") or "")
+            if not isinstance(old_id, int) or not page_path or not source_content:
+                continue
+            existing = cur.execute(
+                "SELECT id FROM knowledge_updates WHERE page_path = ? AND source_content = ? AND created_at = ?",
+                (page_path, source_content, created_at),
+            ).fetchone() if created_at else None
+            if existing:
+                update_map[old_id] = existing["id"]
+                continue
+            status = str(update.get("status") or "draft")
+            if status not in {"draft", "applied", "kept_local", "undone"}:
+                status = "draft"
+            analysis = update.get("analysis_json", "{}")
+            evidence = update.get("evidence_json", "[]")
+            analysis_json = analysis if isinstance(analysis, str) else json.dumps(analysis, ensure_ascii=False)
+            evidence_json = evidence if isinstance(evidence, str) else json.dumps(evidence, ensure_ascii=False)
+            cur.execute(
+                "INSERT INTO knowledge_updates (page_path, page_title, persona, source_content, analysis_json, evidence_json, proposal, proposed_title, target_mode, target_path, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    page_path, str(update.get("page_title") or Path(page_path).stem),
+                    tutor.normalize_persona(str(update.get("persona") or "feynman")), source_content,
+                    analysis_json, evidence_json, str(update.get("proposal") or "")[:5000],
+                    str(update.get("proposed_title") or "")[:120], update.get("target_mode"),
+                    update.get("target_path"), status,
+                    created_at or datetime.now().isoformat(timespec="seconds"),
+                    str(update.get("updated_at") or created_at or datetime.now().isoformat(timespec="seconds")),
+                ),
+            )
+            update_map[old_id] = cur.lastrowid
+            counts["knowledge_updates"] += 1
+        for revision in source["wiki_revisions"]:
+            new_update = update_map.get(revision.get("knowledge_update_id"))
+            page_path = str(revision.get("page_path") or "")
+            before_content = revision.get("before_content")
+            after_content = revision.get("after_content")
+            if not new_update or not page_path or not isinstance(before_content, str) or not isinstance(after_content, str):
+                continue
+            created_at = str(revision.get("created_at") or "")
+            existing = cur.execute(
+                "SELECT 1 FROM wiki_revisions WHERE knowledge_update_id = ? AND page_path = ? AND created_at = ?",
+                (new_update, page_path, created_at),
+            ).fetchone() if created_at else None
+            if existing:
+                continue
+            cur.execute(
+                "INSERT INTO wiki_revisions (knowledge_update_id, page_path, before_content, after_content, created_page, created_at, undone_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (new_update, page_path, before_content, after_content, int(bool(revision.get("created_page"))),
+                 created_at or datetime.now().isoformat(timespec="seconds"), revision.get("undone_at")),
+            )
+            counts["wiki_revisions"] += 1
     return {"dry_run": False, "imported": counts, "message": "已合并导入数据，当前设备既有记录未被删除。"}
 
 
@@ -793,7 +1059,9 @@ def list_orphaned_records() -> list[dict]:
             "SELECT page_path, MAX(page_title) AS page_title, MAX(last_activity) AS last_activity FROM ("
             "SELECT page_path, page_title, updated_at AS last_activity FROM sessions "
             "UNION ALL SELECT page_path, page_path AS page_title, updated_at AS last_activity FROM notes "
-            "UNION ALL SELECT page_path, page_title, updated_at AS last_activity FROM reflections WHERE page_path IS NOT NULL"
+            "UNION ALL SELECT page_path, page_title, updated_at AS last_activity FROM reflections WHERE page_path IS NOT NULL "
+            "UNION ALL SELECT page_path, page_title, updated_at AS last_activity FROM knowledge_updates "
+            "UNION ALL SELECT target_path, page_title, updated_at AS last_activity FROM knowledge_updates WHERE target_path IS NOT NULL"
             ") GROUP BY page_path"
         ).fetchall()
     orphaned = []
@@ -815,8 +1083,9 @@ def relink_page(old_path: str, new_path: str) -> dict:
     with db.cursor() as cur:
         has_records = cur.execute(
             "SELECT EXISTS(SELECT 1 FROM sessions WHERE page_path = ?) OR EXISTS(SELECT 1 FROM notes WHERE page_path = ?) "
-            "OR EXISTS(SELECT 1 FROM reflections WHERE page_path = ?)",
-            (old_path, old_path, old_path),
+            "OR EXISTS(SELECT 1 FROM reflections WHERE page_path = ?) OR EXISTS(SELECT 1 FROM knowledge_updates WHERE page_path = ?) "
+            "OR EXISTS(SELECT 1 FROM knowledge_updates WHERE target_path = ?) OR EXISTS(SELECT 1 FROM wiki_revisions WHERE page_path = ?)",
+            (old_path, old_path, old_path, old_path, old_path, old_path),
         ).fetchone()[0]
         if not has_records:
             raise LookupError("旧页面没有可重新关联的学习记录。")
@@ -827,4 +1096,7 @@ def relink_page(old_path: str, new_path: str) -> dict:
         cur.execute("UPDATE sessions SET page_path = ?, page_title = ?, concept = ? WHERE page_path = ?", (new_path, title, title, old_path))
         cur.execute("UPDATE notes SET page_path = ? WHERE page_path = ?", (new_path, old_path))
         cur.execute("UPDATE reflections SET page_path = ?, page_title = ? WHERE page_path = ?", (new_path, title, old_path))
+        cur.execute("UPDATE knowledge_updates SET page_path = ?, page_title = ? WHERE page_path = ?", (new_path, title, old_path))
+        cur.execute("UPDATE knowledge_updates SET target_path = ? WHERE target_path = ?", (new_path, old_path))
+        cur.execute("UPDATE wiki_revisions SET page_path = ? WHERE page_path = ?", (new_path, old_path))
     return {"old_path": old_path, "new_path": new_path, "title": title}

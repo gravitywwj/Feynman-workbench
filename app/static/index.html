@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>费曼学习工作台</title>
-<link rel="stylesheet" href="/static/style.css?v=20260813-layout-fix">
+<link rel="stylesheet" href="/static/style.css?v=20260818-api-profiles-2">
 </head>
 <body>
 
@@ -34,6 +34,7 @@
       <button id="btn-history" class="btn btn-quiet" type="button">学习记录</button>
       <button id="btn-graph" class="btn btn-quiet">知识图谱</button>
       <button id="btn-review" class="btn btn-quiet">复习模块</button>
+      <button id="btn-api-settings" class="btn btn-quiet" type="button">API 连接</button>
       <button id="btn-workspace" class="btn btn-quiet" type="button">资料与设置</button>
     </div>
     <button id="btn-mobile-menu" class="btn btn-quiet mobile-menu-button" type="button" aria-expanded="false" aria-controls="mobile-menu">更多</button>
@@ -43,6 +44,7 @@
 <nav id="mobile-menu" class="mobile-menu hidden" aria-label="更多功能">
   <button id="btn-mobile-history" class="btn btn-quiet" type="button">学习记录</button>
   <button id="btn-mobile-theme" class="btn btn-quiet" type="button">切换夜间阅读</button>
+  <button id="btn-mobile-api-settings" class="btn btn-quiet" type="button">API 连接</button>
   <button id="btn-mobile-workspace" class="btn btn-quiet" type="button">资料与设置</button>
 </nav>
 
@@ -295,7 +297,7 @@
     <p id="notes-topic" class="modal-topic"></p>
     <label class="sr-only" for="note-input">学习笔记内容</label>
     <textarea id="note-input" maxlength="5000" placeholder="记录你的理解、疑问、项目联想或待验证的想法…"></textarea>
-    <div class="modal-footer"><span id="notes-status">笔记仅保存在此浏览器。</span><button id="btn-save-notes" class="btn btn-primary">保存笔记</button></div>
+    <div class="modal-footer notes-actions"><span id="notes-status">笔记会保存在本地学习库。</span><div><button id="btn-analyze-note" class="btn btn-quiet" type="button">交给 Agent 整理</button><button id="btn-save-notes" class="btn btn-primary">保存笔记</button></div></div>
   </div>
 </div>
 
@@ -308,13 +310,20 @@
     <p id="recall-topic" class="modal-topic"></p>
 
     <div id="recall-intro" class="recall-stage">
-      <div class="assistant-message"><b>学习助手</b><p id="recall-guide">先把参考资料放到一边。不要追求完整，先说出你还记得的部分。</p></div>
-      <ol class="recall-prompts">
-        <li>这个概念主要解决什么问题？</li>
-        <li>它的关键机制或步骤是什么？</li>
-        <li>你能用一个真实场景说明它吗？</li>
-      </ol>
-      <button id="btn-recall-ready" class="btn btn-primary">我准备好了，开始表达</button>
+      <div class="recall-brief-head">
+        <div><p class="eyebrow">本次具体问题</p><h3 id="recall-question">正在依据你的资料准备问题…</h3><p id="recall-why" class="recall-why"></p></div>
+        <span id="recall-source" class="source-chip" aria-live="polite">准备中</span>
+      </div>
+      <div class="assistant-message"><b id="recall-persona-label">费曼教练</b><p id="recall-guide">先把参考资料放到一边。不要追求完整，先说出你还记得的部分。</p></div>
+      <fieldset class="coach-personas" aria-label="选择引导语气"><legend>引导方式</legend>
+        <label class="coach-persona"><input type="radio" name="recall-persona" value="feynman"><span><b>费曼教练</b><small>由浅入深</small></span></label>
+        <label class="coach-persona"><input type="radio" name="recall-persona" value="direct"><span><b>直率追问</b><small>直接指出缺口</small></span></label>
+        <label class="coach-persona"><input type="radio" name="recall-persona" value="exam"><span><b>考试冲刺</b><small>聚焦易错点</small></span></label>
+        <label class="coach-persona"><input type="radio" name="recall-persona" value="reflective"><span><b>温和复盘</b><small>连接旧笔记</small></span></label>
+      </fieldset>
+      <ol id="recall-prompts" class="recall-prompts"><li>正在整理递进问题…</li></ol>
+      <details class="recall-hint"><summary>我卡住了，给我一个提示</summary><p id="recall-hint-text">提示会依据当前资料生成，不直接给出答案。</p></details>
+      <button id="btn-recall-ready" class="btn btn-primary" disabled>开始表达这个问题</button>
     </div>
 
     <div id="recall-editor" class="recall-stage hidden">
@@ -412,6 +421,19 @@
       <label><input type="radio" name="diagnostic-mode" value="local" checked> 完全本地结构检查</label>
       <label><input type="radio" name="diagnostic-mode" value="ai"> AI 深度诊断（需已配置密钥）</label>
     </fieldset>
+    <section id="llm-settings" class="llm-settings" aria-labelledby="llm-settings-title" tabindex="-1">
+      <div class="llm-settings-head"><div><h3 id="llm-settings-title">学习助手 API</h3><p>可保存多个兼容 OpenAI API 的连接。网页中已启用的连接优先于 `.env`，切换后立即用于回忆引导、笔记整理和资料核对。</p></div><span id="llm-config-badge" class="llm-config-badge" aria-live="polite">未配置</span></div>
+      <div class="llm-setting-grid">
+        <label class="field-label" for="llm-profile-name">连接名称<input id="llm-profile-name" type="text" maxlength="60" autocomplete="off" placeholder="例如：Agnes 日常学习"></label>
+        <label class="field-label" for="llm-base-url">服务地址<input id="llm-base-url" type="url" inputmode="url" autocomplete="url" placeholder="https://你的服务地址/v1"></label>
+        <label class="field-label" for="llm-model">模型标识<input id="llm-model" type="text" maxlength="160" autocomplete="off" placeholder="例如：服务提供的模型标识"></label>
+        <label class="field-label llm-key-field" for="llm-api-key">API Key<input id="llm-api-key" type="password" maxlength="1000" autocomplete="new-password" placeholder="新建连接时必填；编辑已有连接时留空即可保留"></label>
+      </div>
+      <p id="llm-config-detail" class="llm-config-detail">密钥只保存在当前设备的本地配置中，不会展示、导出或写入 Wiki。</p>
+      <div class="llm-setting-actions"><button id="btn-save-llm-settings" class="btn btn-quiet" type="button">保存并启用连接</button><button id="btn-new-llm-profile" class="text-btn" type="button">新建连接</button><button id="btn-test-llm-settings" class="text-btn" type="button">测试当前连接</button><button id="btn-clear-llm-key" class="text-btn llm-danger-action" type="button">删除当前连接</button></div>
+      <p id="llm-settings-status" class="llm-settings-status" aria-live="polite"></p>
+      <div class="llm-profile-section"><div class="llm-profile-heading"><h4>已保存连接</h4><span>密钥已脱敏</span></div><div id="llm-profile-list" class="llm-profile-list" role="list"><p class="llm-profile-empty">正在读取连接…</p></div></div>
+    </section>
     <label class="field-label">每日复习目标 <input id="daily-review-goal" type="number" min="1" max="50" value="5"></label>
     <fieldset class="workspace-choice"><legend>当前学习目标</legend>
       <label><input type="radio" name="learning-goal" value="long_term" checked> 长期掌握</label>
@@ -422,6 +444,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20260813-layout-fix"></script>
+<script src="/static/app.js?v=20260818-api-profiles"></script>
 </body>
 </html>

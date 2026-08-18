@@ -449,13 +449,37 @@ async function saveNotes() {
   if (G.allNodes.length) refreshGraphData(false);
 }
 
-const RECALL_GUIDES = [
-  '先把参考资料放到一边。不要追求完整，先说出你还记得的部分。',
-  '先用一句话说：这个概念主要解决什么问题？然后再补充原因。',
-  '想一想它是怎样起作用的。若你能举一个真实例子，理解会更扎实。',
-  '如果要向同事解释它，你会先说哪一点？从最确定的部分开始即可。',
-];
+async function analyzeCurrentNote() {
+  if (!state.selected) return;
+  const input = document.getElementById('note-input');
+  const content = input.value.trim();
+  const button = document.getElementById('btn-analyze-note');
+  if (content.length < 4) {
+    document.getElementById('notes-status').textContent = '先写下一条具体的理解、疑问或想法，再让 Agent 整理。';
+    input.focus();
+    return;
+  }
+  button.disabled = true;
+  button.textContent = '正在整理…';
+  storageSet(noteKey(state.selected.path), input.value);
+  try {
+    await api('/api/study/notes?page_path=' + encodeURIComponent(state.selected.path), {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: input.value }),
+    });
+    closeNotes();
+    await openHistory('knowledge');
+    await createKnowledgeUpdate(content);
+  } catch (e) {
+    document.getElementById('notes-status').textContent = `暂时无法整理笔记：${e.message}`;
+  } finally {
+    button.disabled = false;
+    button.textContent = '交给 Agent 整理';
+  }
+}
+
 let recallGuideIndex = 0;
+let recallBrief = null;
+let recallPersona = storageGet('feynman-recall-persona') || 'feynman';
 
 let activeSessionId = null;
 let latestOutcome = null;
@@ -468,12 +492,47 @@ function setRecallStage(stage) {
   document.getElementById('recall-outcome').classList.toggle('hidden', stage !== 'outcome');
 }
 
+async function loadRecallBrief() {
+  if (!state.selected) return;
+  const ready = document.getElementById('btn-recall-ready');
+  ready.disabled = true;
+  document.getElementById('recall-question').textContent = '正在依据当前 Wiki、笔记和待澄清点准备问题…';
+  document.getElementById('recall-source').textContent = '准备中';
+  try {
+    recallBrief = await api('/api/study/recall-brief', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ page_path: state.selected.path, persona: recallPersona }),
+    });
+    document.getElementById('recall-persona-label').textContent = recallBrief.persona_label;
+    document.getElementById('recall-guide').textContent = recallBrief.opening;
+    document.getElementById('recall-question').textContent = recallBrief.question;
+    document.getElementById('recall-why').textContent = recallBrief.why_now;
+    document.getElementById('recall-prompts').innerHTML = recallBrief.follow_ups.map(prompt => `<li>${esc(prompt)}</li>`).join('');
+    document.getElementById('recall-hint-text').textContent = recallBrief.hint;
+    document.getElementById('recall-editor-guide').textContent = recallBrief.question;
+    document.getElementById('recall-input').placeholder = `围绕这个问题表达：${recallBrief.question}`;
+    document.getElementById('recall-source').textContent = recallBrief.source === 'llm' ? '已依据资料生成' : '本地资料引导';
+    ready.disabled = false;
+  } catch (e) {
+    recallBrief = null;
+    document.getElementById('recall-question').textContent = '暂时无法生成具体问题。请稍后再试，或先从资料中的定义与例子开始回忆。';
+    document.getElementById('recall-source').textContent = '未生成';
+  }
+}
+
+function syncRecallPersona() {
+  document.querySelectorAll('input[name="recall-persona"]').forEach(input => {
+    input.checked = input.value === recallPersona;
+  });
+}
+
 function openRecall(stage = 'intro', sessionId = null) {
   if (!state.selected) return;
   const { path, title } = state.selected;
   recallGuideIndex = 0;
   document.getElementById('recall-topic').textContent = `本次回顾：${title}`;
-  document.getElementById('recall-guide').textContent = RECALL_GUIDES[0];
+  syncRecallPersona();
+  document.getElementById('recall-guide').textContent = '正在准备本次回忆引导…';
   document.getElementById('recall-editor-guide').textContent = '从你最确定的一点开始，卡住是正常的；那正是下一步要核对的地方。';
   document.getElementById('recall-input').value = storageGet(recallKey(path));
   activeSessionId = sessionId;
@@ -485,9 +544,11 @@ function openRecall(stage = 'intro', sessionId = null) {
   } else setRecallStage('intro');
   document.getElementById('recall-modal').classList.remove('hidden');
   setStep(1);
+  if (stage !== 'simplify') loadRecallBrief();
 }
 
 function beginRecall() {
+  if (!recallBrief) return;
   setRecallStage('editor');
   recallStartedAt ||= Date.now();
   setStep(2);
@@ -495,8 +556,9 @@ function beginRecall() {
 }
 
 function nextRecallGuide() {
-  recallGuideIndex = (recallGuideIndex + 1) % RECALL_GUIDES.length;
-  document.getElementById('recall-editor-guide').textContent = RECALL_GUIDES[recallGuideIndex];
+  const guides = recallBrief?.follow_ups?.length ? recallBrief.follow_ups : [recallBrief?.hint || '先说明它解决什么问题，再补上关键步骤。'];
+  recallGuideIndex = (recallGuideIndex + 1) % guides.length;
+  document.getElementById('recall-editor-guide').textContent = guides[recallGuideIndex];
 }
 
 let speechRecognition = null;
@@ -544,7 +606,7 @@ async function saveRecall() {
   try {
     const result = await api('/api/study/sessions', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ page_path: state.selected.path, explanation: value, elapsed_seconds: Math.round((Date.now() - (recallStartedAt || Date.now())) / 1000) }),
+      body: JSON.stringify({ page_path: state.selected.path, explanation: value, persona: recallPersona, elapsed_seconds: Math.round((Date.now() - (recallStartedAt || Date.now())) / 1000) }),
     });
     activeSessionId = result.session.id;
     const localStructure = result.diagnosis.confidence === 'structure_only';
@@ -809,6 +871,140 @@ async function summarizeSelectedReflections() {
   }
 }
 
+let knowledgeSelectedId = null;
+
+function ensureKnowledgeTab() {
+  const tabs = document.querySelector('.history-tabs');
+  if (!tabs || tabs.querySelector('[data-history-view="knowledge"]')) return;
+  const button = document.createElement('button');
+  button.className = 'history-tab';
+  button.type = 'button';
+  button.dataset.historyView = 'knowledge';
+  button.setAttribute('role', 'tab');
+  button.setAttribute('aria-selected', 'false');
+  button.textContent = '知识演进';
+  tabs.append(button);
+  button.addEventListener('click', () => openHistory('knowledge'));
+}
+
+function knowledgeStatusLabel(status) {
+  return { draft: '待审核', applied: '已写入', kept_local: '仅本地保存', undone: '已撤销' }[status] || status;
+}
+
+function knowledgeItemMarkup(item) {
+  const active = Number(item.id) === Number(knowledgeSelectedId);
+  return `<button class="knowledge-update-select ${active ? 'active' : ''}" type="button" data-knowledge-id="${item.id}" aria-pressed="${active}">
+    <span class="knowledge-status-dot ${esc(item.status)}" aria-hidden="true"></span>
+    <span><b>${esc(item.page_title)}</b><small>${esc(knowledgeStatusLabel(item.status))} · ${esc(item.created_at || '')}</small></span>
+  </button>`;
+}
+
+function knowledgeEvidenceMarkup(item) {
+  if (!item.evidence?.length) return '<p class="knowledge-empty">没有找到可展示的本地 Wiki 依据。</p>';
+  return `<ul class="knowledge-evidence-list">${item.evidence.map(source => `
+    <li><button class="text-btn btn-open-evidence" type="button" data-page-path="${esc(source.path)}">${esc(source.title)}</button><p>${esc(source.excerpt || '未截取到相关片段。')}</p></li>
+  `).join('')}</ul>`;
+}
+
+function knowledgeDetailMarkup(item) {
+  const analysis = item.analysis || {};
+  const applied = item.status === 'applied';
+  const canEdit = item.status === 'draft';
+  return `<section class="knowledge-detail" data-knowledge-id="${item.id}" aria-labelledby="knowledge-detail-title">
+    <div class="knowledge-detail-head"><div><p class="eyebrow">知识库更新草案</p><h3 id="knowledge-detail-title">${esc(item.page_title)}</h3></div><span class="knowledge-kind ${esc(item.status)}">${esc(knowledgeStatusLabel(item.status))}</span></div>
+    <section class="knowledge-source"><h4>你的记录</h4><p>${historyEscape(item.source_content)}</p></section>
+    <section class="knowledge-analysis"><h4>Agent 分析 <small>${analysis.source === 'llm' ? '仅依据下方本地资料' : '本地整理，不核验事实'}</small></h4><p>${esc(analysis.summary || '已整理为待审核草案。')}</p><p class="knowledge-answer">${esc(analysis.answer || '')}</p>${analysis.open_questions?.length ? `<ul>${analysis.open_questions.map(question => `<li>${esc(question)}</li>`).join('')}</ul>` : ''}</section>
+    <section class="knowledge-evidence"><h4>本地 Wiki 依据</h4>${knowledgeEvidenceMarkup(item)}</section>
+    <section class="knowledge-proposal"><label for="knowledge-proposal-${item.id}">建议写入内容</label><textarea id="knowledge-proposal-${item.id}" maxlength="5000" ${canEdit ? '' : 'readonly'}>${esc(item.proposal)}</textarea></section>
+    ${canEdit ? `<fieldset class="knowledge-target"><legend>写入方式</legend>
+      <label><input type="radio" name="knowledge-target-${item.id}" value="append_current" checked> 追加到当前 Wiki 页</label>
+      <label><input type="radio" name="knowledge-target-${item.id}" value="create_idea"> 新建关联想法页</label>
+      <label><input type="radio" name="knowledge-target-${item.id}" value="keep_local"> 只保留在本地学习库</label>
+      <label class="knowledge-title-field" for="knowledge-title-${item.id}">新想法页标题<input id="knowledge-title-${item.id}" maxlength="120" value="${esc(item.proposed_title || '')}"></label>
+    </fieldset>
+    <div class="knowledge-safeguard">确认写入前会保存完整快照。写入后可撤销，若页面已被你手动修改则会停止自动回档。</div>
+    <div class="knowledge-actions"><button class="btn btn-primary btn-apply-knowledge" type="button">确认并处理草案</button></div>` : ''}
+    ${applied ? `<div class="knowledge-applied"><p>已写入 <b>${esc(item.target_path || item.page_path)}</b>。写入前快照仍可用于恢复。</p><button class="btn btn-quiet btn-undo-knowledge" type="button">撤销这次更新</button></div>` : ''}
+  </section>`;
+}
+
+async function renderKnowledgeUpdates() {
+  const hint = document.getElementById('history-hint');
+  const content = document.getElementById('history-content');
+  hint.textContent = '正在读取可审核的知识库草案…';
+  try {
+    const data = await api('/api/study/knowledge-updates?limit=80');
+    const updates = data.updates || [];
+    if (!knowledgeSelectedId && updates.length) knowledgeSelectedId = updates[0].id;
+    const selected = updates.find(item => Number(item.id) === Number(knowledgeSelectedId)) || updates[0];
+    if (selected) knowledgeSelectedId = selected.id;
+    hint.textContent = updates.length
+      ? 'Agent 只检索本地 Wiki。草案不会自动写入，确认后会创建快照，可在页面未再次修改时撤销。'
+      : '从“学习笔记”中选择“交给 Agent 整理”，即可检索本地 Wiki 并生成第一份可审核草案。';
+    content.innerHTML = `<div class="knowledge-workspace">
+      <aside class="knowledge-timeline" aria-label="知识库草案列表">${updates.map(knowledgeItemMarkup).join('') || '<p class="knowledge-empty">还没有草案。</p>'}</aside>
+      <div class="knowledge-detail-wrap">${selected ? knowledgeDetailMarkup(selected) : '<section class="knowledge-empty-state"><h3>让一条笔记开始演进</h3><p>记录理解、疑问或联想后，Agent 会列出本地依据并生成可编辑草案。你确认后才会写入 Wiki。</p></section>'}</div>
+    </div>`;
+    playEntryMotion(content, 'view-enter');
+  } catch (e) {
+    hint.textContent = `暂时无法读取知识库草案：${e.message}`;
+  }
+}
+
+async function createKnowledgeUpdate(content) {
+  if (!state.selected) return;
+  const hint = document.getElementById('history-hint');
+  hint.textContent = '正在检索本地 Wiki，并生成可审核草案…';
+  try {
+    const update = await api('/api/study/knowledge-updates', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content, page_path: state.selected.path, persona: recallPersona }),
+    });
+    knowledgeSelectedId = update.id;
+    await renderKnowledgeUpdates();
+  } catch (e) {
+    hint.textContent = `未能生成草案：${e.message}`;
+  }
+}
+
+async function applyKnowledgeUpdate(detail) {
+  const id = Number(detail.dataset.knowledgeId);
+  const proposal = detail.querySelector('[id^="knowledge-proposal-"]').value.trim();
+  const target = detail.querySelector(`input[name="knowledge-target-${id}"]:checked`)?.value;
+  const title = detail.querySelector('[id^="knowledge-title-"]').value.trim();
+  const button = detail.querySelector('.btn-apply-knowledge');
+  button.disabled = true;
+  button.textContent = '正在保存快照并处理…';
+  try {
+    await api(`/api/study/knowledge-updates/${id}/apply`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target_mode: target, proposal, proposed_title: title }),
+    });
+    await renderKnowledgeUpdates();
+    if (target !== 'keep_local') loadConcepts();
+  } catch (e) {
+    button.disabled = false;
+    button.textContent = '确认并处理草案';
+    document.getElementById('history-hint').textContent = `未能处理草案：${e.message}`;
+  }
+}
+
+async function undoKnowledgeUpdate(detail) {
+  const id = Number(detail.dataset.knowledgeId);
+  const button = detail.querySelector('.btn-undo-knowledge');
+  button.disabled = true;
+  button.textContent = '正在恢复快照…';
+  try {
+    await api(`/api/study/knowledge-updates/${id}/undo`, { method: 'POST' });
+    await renderKnowledgeUpdates();
+    loadConcepts();
+  } catch (e) {
+    button.disabled = false;
+    button.textContent = '撤销这次更新';
+    document.getElementById('history-hint').textContent = `无法自动撤销：${e.message}`;
+  }
+}
+
 function gapStatusText(status) {
   return { open: '待补充', revised: '已补充，待核对', verified: '已澄清' }[status] || status;
 }
@@ -833,6 +1029,10 @@ async function openHistory(view = 'gaps') {
   try {
     if (view === 'reflections') {
       await renderReflections();
+      return;
+    }
+    if (view === 'knowledge') {
+      await renderKnowledgeUpdates();
       return;
     }
     if (view === 'sessions') {
@@ -1852,6 +2052,177 @@ async function importLearningFile(file) {
   } catch (e) { hint.textContent = `无法导入学习数据：${e.message}`; }
 }
 
+let llmEditingProfileId = null;
+
+function llmTestLabel(lastTest) {
+  if (!lastTest?.tested_at) return '尚未测试';
+  const result = lastTest.ok ? '已连通' : '连接失败';
+  return `${result} · ${String(lastTest.tested_at).replace('T', ' ')}`;
+}
+
+function llmProfileMarkup(profile) {
+  const testing = llmTestLabel(profile.last_test);
+  return `<article class="llm-profile ${profile.active ? 'active' : ''}" role="listitem" data-llm-profile-id="${esc(profile.id)}">
+    <div class="llm-profile-copy"><div><b>${esc(profile.name)}</b>${profile.active ? '<span class="llm-profile-active">正在使用</span>' : ''}</div><small>${esc(profile.model)} · ${esc(profile.base_url)}</small><p class="${profile.last_test?.ok === false ? 'failed' : ''}">${esc(testing)}</p></div>
+    <div class="llm-profile-actions">${profile.active ? '<span class="llm-profile-current">已启用</span>' : '<button class="text-btn" type="button" data-llm-action="activate">一键启用</button>'}<button class="text-btn" type="button" data-llm-action="edit">编辑</button><button class="text-btn llm-danger-action" type="button" data-llm-action="delete">删除</button></div>
+  </article>`;
+}
+
+function renderLlmProfiles(settings) {
+  const list = document.getElementById('llm-profile-list');
+  const profiles = settings.profiles || [];
+  list.innerHTML = profiles.length
+    ? profiles.map(llmProfileMarkup).join('')
+    : `<p class="llm-profile-empty">${settings.environment_fallback_available ? '尚无网页保存的连接，当前可使用 .env 备用配置。' : '尚无已保存连接。填写上方信息后保存第一条连接。'}</p>`;
+}
+
+function renderLlmSettings(settings, message = '') {
+  state.llmSettings = settings;
+  const profiles = settings.profiles || [];
+  if (llmEditingProfileId && !profiles.some(profile => profile.id === llmEditingProfileId)) llmEditingProfileId = null;
+  if (!llmEditingProfileId) llmEditingProfileId = settings.active_profile_id || null;
+  const editing = profiles.find(profile => profile.id === llmEditingProfileId);
+  document.getElementById('llm-profile-name').value = editing?.name || '';
+  document.getElementById('llm-base-url').value = editing?.base_url || settings.base_url || '';
+  document.getElementById('llm-model').value = editing?.model || settings.model || '';
+  document.getElementById('llm-api-key').value = '';
+  const badge = document.getElementById('llm-config-badge');
+  badge.classList.toggle('configured', Boolean(settings.configured));
+  badge.classList.toggle('environment', settings.source === 'environment');
+  badge.textContent = settings.source === 'local'
+    ? `正在使用：${settings.active_profile_name}`
+    : settings.source === 'environment' ? '.env 备用连接' : '未配置';
+  const source = settings.source === 'local'
+    ? `当前网页连接「${settings.active_profile_name}」已启用，密钥为 ${settings.api_key_masked}。`
+    : settings.source === 'environment'
+      ? '当前使用 .env 备用连接。保存任意网页连接后，它会立即优先于 .env。'
+      : '尚未配置连接，仍可使用完全本地的学习流程。';
+  document.getElementById('llm-config-detail').textContent = `${source} 密钥不会展示、导出或写入 Wiki。`;
+  document.getElementById('btn-clear-llm-key').disabled = !settings.active_profile_id;
+  renderLlmProfiles(settings);
+  const status = document.getElementById('llm-settings-status');
+  status.textContent = message;
+  status.classList.remove('is-error', 'is-success');
+}
+
+async function loadLlmSettings() {
+  const status = document.getElementById('llm-settings-status');
+  status.textContent = '正在读取本机 API 设置…';
+  try {
+    renderLlmSettings(await api('/api/study/llm-settings'));
+  } catch (e) {
+    status.textContent = `暂时无法读取 API 设置：${e.message}`;
+  }
+}
+
+function llmSettingsPayload() {
+  return {
+    api_key: document.getElementById('llm-api-key').value,
+    base_url: document.getElementById('llm-base-url').value.trim(),
+    model: document.getElementById('llm-model').value.trim(),
+    profile_name: document.getElementById('llm-profile-name').value.trim(),
+    profile_id: llmEditingProfileId,
+  };
+}
+
+async function saveLlmSettings() {
+  const button = document.getElementById('btn-save-llm-settings');
+  const status = document.getElementById('llm-settings-status');
+  button.disabled = true;
+  status.classList.remove('is-error', 'is-success');
+  status.textContent = '正在保存并启用这条连接…';
+  try {
+    const saved = await api('/api/study/llm-settings', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(llmSettingsPayload()),
+    });
+    llmEditingProfileId = saved.active_profile_id;
+    renderLlmSettings(saved, '连接已保存并启用。它现在优先于 .env；如需深度诊断，请同时在上方选择 AI 深度诊断并保存学习空间。');
+  } catch (e) {
+    status.textContent = `无法保存 API 设置：${e.message}`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function testLlmSettings() {
+  const button = document.getElementById('btn-test-llm-settings');
+  const status = document.getElementById('llm-settings-status');
+  button.disabled = true;
+  status.classList.remove('is-error', 'is-success');
+  status.textContent = '正在向当前配置的模型发送最小连接测试…';
+  try {
+    const result = await api('/api/study/llm-settings/test', { method: 'POST' });
+    const refreshed = await api('/api/study/llm-settings');
+    renderLlmSettings(refreshed, result.message);
+    status.classList.toggle('is-error', !result.ok);
+    status.classList.toggle('is-success', result.ok);
+  } catch (e) {
+    status.textContent = `无法测试连接：${e.message}`;
+    status.classList.add('is-error');
+    status.classList.remove('is-success');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function newLlmProfile() {
+  llmEditingProfileId = null;
+  document.getElementById('llm-profile-name').value = '';
+  document.getElementById('llm-base-url').value = '';
+  document.getElementById('llm-model').value = '';
+  document.getElementById('llm-api-key').value = '';
+  const status = document.getElementById('llm-settings-status');
+  status.classList.remove('is-error', 'is-success');
+  status.textContent = '正在新建连接。填写名称、服务地址、模型标识和 API Key 后保存。';
+  document.getElementById('llm-profile-name').focus();
+}
+
+async function activateLlmProfile(profileId) {
+  const status = document.getElementById('llm-settings-status');
+  status.textContent = '正在切换学习助手连接…';
+  try {
+    const settings = await api(`/api/study/llm-settings/${encodeURIComponent(profileId)}/activate`, { method: 'POST' });
+    llmEditingProfileId = settings.active_profile_id;
+    renderLlmSettings(settings, `已切换到「${settings.active_profile_name}」。`);
+    await loadWorkspace();
+  } catch (e) {
+    status.textContent = `无法切换连接：${e.message}`;
+  }
+}
+
+function editLlmProfile(profileId) {
+  llmEditingProfileId = profileId;
+  const profile = state.llmSettings?.profiles?.find(item => item.id === profileId);
+  if (!profile) return;
+  document.getElementById('llm-profile-name').value = profile.name;
+  document.getElementById('llm-base-url').value = profile.base_url;
+  document.getElementById('llm-model').value = profile.model;
+  document.getElementById('llm-api-key').value = '';
+  document.getElementById('llm-settings-status').textContent = `正在编辑「${profile.name}」。留空 API Key 会保留已保存的密钥；保存后会启用这条连接。`;
+}
+
+async function deleteLlmProfile(profileId) {
+  const profile = state.llmSettings?.profiles?.find(item => item.id === profileId);
+  if (!profile || !window.confirm(`删除连接「${profile.name}」？此操作会移除当前设备保存的密钥，无法撤销。`)) return;
+  const status = document.getElementById('llm-settings-status');
+  status.classList.remove('is-error', 'is-success');
+  status.textContent = '正在删除当前设备保存的连接…';
+  try {
+    const settings = await api(`/api/study/llm-settings/${encodeURIComponent(profileId)}`, { method: 'DELETE' });
+    llmEditingProfileId = settings.active_profile_id;
+    renderLlmSettings(settings, `已删除「${profile.name}」。`);
+    await loadWorkspace();
+  } catch (e) {
+    status.textContent = `无法删除连接：${e.message}`;
+  }
+}
+
+async function clearLocalLlmKey() {
+  const current = state.llmSettings;
+  if (current?.active_profile_id) deleteLlmProfile(current.active_profile_id);
+}
+
 async function openWorkspace() {
   const modal = document.getElementById('workspace-modal');
   modal.classList.remove('hidden');
@@ -1868,6 +2239,14 @@ async function openWorkspace() {
     ? '当前 Wiki 由启动环境指定，保存的路径会在下次未指定环境变量时生效。'
     : (workspace.configured ? '当前资料已连接。' : '尚未连接有效 Wiki，可先使用示例体验。');
   syncWorkspaceFields();
+  await loadLlmSettings();
+}
+
+async function openApiSettings() {
+  await openWorkspace();
+  const section = document.getElementById('llm-settings');
+  section.scrollIntoView({ block: 'start', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  section.focus({ preventScroll: true });
 }
 
 function selectedWorkspaceMode() { return document.querySelector('input[name="workspace-mode"]:checked').value; }
@@ -1944,6 +2323,7 @@ document.getElementById('btn-start-inline').addEventListener('click', openRecall
 document.getElementById('btn-open-notes').addEventListener('click', openNotes);
 document.getElementById('btn-close-notes').addEventListener('click', closeNotes);
 document.getElementById('btn-save-notes').addEventListener('click', saveNotes);
+document.getElementById('btn-analyze-note').addEventListener('click', analyzeCurrentNote);
 document.getElementById('notes-modal').addEventListener('click', (e) => {
   if (e.target.id === 'notes-modal') closeNotes();
 });
@@ -1951,6 +2331,12 @@ document.getElementById('btn-close-recall').addEventListener('click', closeRecal
 document.getElementById('btn-recall-ready').addEventListener('click', beginRecall);
 document.getElementById('btn-recall-hint').addEventListener('click', nextRecallGuide);
 document.getElementById('btn-save-recall').addEventListener('click', saveRecall);
+document.querySelectorAll('input[name="recall-persona"]').forEach(input => input.addEventListener('change', () => {
+  recallPersona = input.value;
+  storageSet('feynman-recall-persona', recallPersona);
+  recallGuideIndex = 0;
+  loadRecallBrief();
+}));
 document.getElementById('btn-start-simplify').addEventListener('click', startSimplify);
 document.getElementById('btn-save-simplify').addEventListener('click', saveSimplify);
 document.getElementById('btn-outcome-next').addEventListener('click', openOutcomeNext);
@@ -1994,6 +2380,7 @@ document.getElementById('history-modal').addEventListener('click', (e) => {
 });
 document.querySelectorAll('.history-tab').forEach(tab => tab.addEventListener('click', () => openHistory(tab.dataset.historyView)));
 ensureReflectionTab();
+ensureKnowledgeTab();
 document.getElementById('history-content').addEventListener('click', (e) => {
   const button = e.target.closest('.btn-save-gap');
   if (button) saveGapRevision(button.closest('.gap-item'));
@@ -2002,6 +2389,12 @@ document.getElementById('history-content').addEventListener('click', (e) => {
   if (e.target.closest('#btn-save-reflection')) saveReflection();
   if (e.target.closest('.btn-update-reflection')) updateReflection(e.target.closest('.reflection-item'));
   if (e.target.closest('#btn-summarize-reflections')) summarizeSelectedReflections();
+  const knowledgeChoice = e.target.closest('.knowledge-update-select');
+  if (knowledgeChoice) { knowledgeSelectedId = Number(knowledgeChoice.dataset.knowledgeId); renderKnowledgeUpdates(); }
+  if (e.target.closest('.btn-apply-knowledge')) applyKnowledgeUpdate(e.target.closest('.knowledge-detail'));
+  if (e.target.closest('.btn-undo-knowledge')) undoKnowledgeUpdate(e.target.closest('.knowledge-detail'));
+  const evidence = e.target.closest('.btn-open-evidence');
+  if (evidence) { document.getElementById('history-modal').classList.add('hidden'); selectConcept(evidence.dataset.pagePath); }
 });
 document.getElementById('history-content').addEventListener('change', (e) => {
   if (e.target.matches('.reflection-select-input')) syncReflectionSelection();
@@ -2044,6 +2437,12 @@ document.getElementById('btn-review').addEventListener('click', () => {
   openReviewPlan();
 });
 document.getElementById('btn-mobile-review').addEventListener('click', () => openReviewPlan());
+document.getElementById('btn-api-settings').addEventListener('click', openApiSettings);
+document.getElementById('btn-mobile-api-settings').addEventListener('click', () => {
+  document.getElementById('mobile-menu').classList.add('hidden');
+  document.getElementById('btn-mobile-menu').setAttribute('aria-expanded', 'false');
+  openApiSettings();
+});
 document.getElementById('btn-workspace').addEventListener('click', openWorkspace);
 document.getElementById('btn-mobile-workspace').addEventListener('click', () => {
   document.getElementById('mobile-menu').classList.add('hidden');
@@ -2065,6 +2464,19 @@ document.querySelectorAll('input[name="workspace-mode"]').forEach(input => input
 document.getElementById('btn-preview-workspace').addEventListener('click', previewWorkspace);
 document.getElementById('btn-choose-workspace').addEventListener('click', chooseWorkspaceDirectory);
 document.getElementById('btn-save-workspace').addEventListener('click', saveWorkspace);
+document.getElementById('btn-save-llm-settings').addEventListener('click', saveLlmSettings);
+document.getElementById('btn-new-llm-profile').addEventListener('click', newLlmProfile);
+document.getElementById('btn-test-llm-settings').addEventListener('click', testLlmSettings);
+document.getElementById('btn-clear-llm-key').addEventListener('click', clearLocalLlmKey);
+document.getElementById('llm-profile-list').addEventListener('click', (e) => {
+  const button = e.target.closest('[data-llm-action]');
+  const profile = e.target.closest('[data-llm-profile-id]');
+  if (!button || !profile) return;
+  const profileId = profile.dataset.llmProfileId;
+  if (button.dataset.llmAction === 'activate') activateLlmProfile(profileId);
+  if (button.dataset.llmAction === 'edit') editLlmProfile(profileId);
+  if (button.dataset.llmAction === 'delete') deleteLlmProfile(profileId);
+});
 document.querySelectorAll('.review-mode-tab').forEach(tab => tab.addEventListener('click', () => openReviewPlan(tab.dataset.reviewMode)));
 document.getElementById('btn-review-inline').addEventListener('click', () => {
   openReviewPlan();

@@ -4,5 +4,6 @@ __pycache__/
 .pytest_tmp/
 data/*.db
 data/workspace-settings.json
+data/llm-settings.json
 data/*.tmp
 .env

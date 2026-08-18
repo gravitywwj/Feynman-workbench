@@ -1,9 +1,10 @@
-"""费曼学习工作台 — Wiki frontmatter 写入层（受控写回）
+"""费曼学习工作台 — Wiki 受控写回层。
 
-只允许更新白名单标量字段（status / importance），绝不改动正文与其它字段。
-写入保持 UTF-8 + LF，防止破坏 raw sha256 与 git 行尾约定。
+阅读状态只允许更新白名单 frontmatter 字段；学习内容只能在用户确认后追加到
+一个应用管理的 ``学习增量`` 区块，或新建关联想法页。写入保持 UTF-8 + LF。
 """
 import re
+from datetime import datetime
 from pathlib import Path
 
 from app.config import get_wiki_path
@@ -13,6 +14,7 @@ STATUS_VALUES = {"unread", "reading", "read"}
 IMPORTANCE_VALUES = {"high", "medium", "low", ""}
 
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.S)
+LEARNING_SECTION = "## 学习增量"
 
 
 def _validate(path: str) -> Path:
@@ -78,3 +80,73 @@ def update_frontmatter(path: str, updates: dict) -> dict:
     new_text = new_text.replace("\r\n", "\n").replace("\r", "\n")
     f.write_text(new_text, encoding="utf-8", newline="\n")
     return {"path": path, "updated": dict(updates)}
+
+
+def _normalized(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def append_learning_update(path: str, content: str, update_id: int) -> dict:
+    """Append an approved draft under one app-owned Wiki section.
+
+    The caller stores the returned before/after snapshot before exposing undo.
+    Existing authored content is never rewritten or interpreted by the app.
+    """
+    entry = content.strip()
+    if not entry:
+        raise ValueError("知识库草案不能为空")
+    file_path = _validate(path)
+    before = _normalized(file_path.read_text(encoding="utf-8"))
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    marker = f"<!-- feynman-workbench:update:{update_id} -->"
+    block = f"\n### 学习记录 · {stamp}\n\n{entry}\n\n{marker}\n"
+    if LEARNING_SECTION in before:
+        after = before.rstrip() + "\n" + block
+    else:
+        after = before.rstrip() + f"\n\n{LEARNING_SECTION}\n" + block
+    file_path.write_text(after, encoding="utf-8", newline="\n")
+    return {"path": path, "before_content": before, "after_content": after, "created_page": False}
+
+
+def create_linked_idea_page(source_path: str, title: str, content: str, update_id: int) -> dict:
+    """Create one new, linked idea page after the learner approves the draft."""
+    _validate(source_path)
+    clean_title = re.sub(r"[\\/:*?\"<>|]+", "-", title).strip()[:80] or "学习想法"
+    clean_title = re.sub(r"[\r\n]+", " ", clean_title).strip() or "学习想法"
+    slug = re.sub(r"[^\w\u4e00-\u9fff-]+", "-", clean_title).strip("-") or "learning-idea"
+    ideas_dir = get_wiki_path() / "pages" / "学习想法"
+    ideas_dir.mkdir(parents=True, exist_ok=True)
+    suffix = datetime.now().strftime("%Y%m%d-%H%M%S")
+    target = ideas_dir / f"{slug}-{suffix}.md"
+    counter = 2
+    while target.exists():
+        target = ideas_dir / f"{slug}-{suffix}-{counter}.md"
+        counter += 1
+    source_label = Path(source_path).stem
+    after = _normalized(
+        f"---\n"
+        f"title: {clean_title}\n"
+        f"type: learning-idea\n"
+        f"created: {datetime.now().date().isoformat()}\n"
+        f"---\n\n"
+        f"# {clean_title}\n\n"
+        f"关联学习页：[[{source_label}]]\n\n"
+        f"{LEARNING_SECTION}\n\n"
+        f"{content.strip()}\n\n"
+        f"<!-- feynman-workbench:update:{update_id} -->\n"
+    )
+    target.write_text(after, encoding="utf-8", newline="\n")
+    relative_path = target.relative_to(get_wiki_path() / "pages").as_posix()
+    return {"path": relative_path, "before_content": "", "after_content": after, "created_page": True}
+
+
+def restore_revision(path: str, before_content: str, after_content: str, *, created_page: bool) -> None:
+    """Undo only when the Wiki page still matches the recorded post-write state."""
+    file_path = _validate(path)
+    current = _normalized(file_path.read_text(encoding="utf-8"))
+    if current != _normalized(after_content):
+        raise ValueError("该 Wiki 页面在写入后又被修改，无法安全自动撤销。请先查看变更后再手动处理。")
+    if created_page:
+        file_path.unlink()
+        return
+    file_path.write_text(_normalized(before_content), encoding="utf-8", newline="\n")

@@ -72,7 +72,7 @@ def test_reader_preferences_note_and_recall_flow(wiki):
         page.get_by_role("button", name="关闭", exact=True).click()
 
         page.get_by_role("button", name="开始回忆表达").click()
-        page.get_by_role("button", name="我准备好了，开始表达").click()
+        page.get_by_role("button", name="开始表达这个问题").click()
         page.locator("#recall-input").fill("查询改写会补充问题缺少的上下文和关键词，所以检索更容易命中真正需要的资料。例如把模糊问题补上对象、场景和约束条件。")
         page.get_by_role("button", name="保存并生成诊断").click()
         page.get_by_role("button", name="补充后，用更简单的话再讲一次").click()
@@ -115,6 +115,60 @@ def test_reader_preferences_note_and_recall_flow(wiki):
         page.locator("#concept-tree").get_by_text("Query Rewriting 查询改写", exact=True).click()
         page.get_by_role("button", name="阅读外观").click()
         assert page.locator("#reading-font-size").input_value() == "20"
+        browser.close()
+
+
+@pytest.mark.ui
+def test_note_can_be_reviewed_written_and_undone_through_knowledge_evolution(wiki):
+    browser_paths = sorted((Path.home() / "AppData" / "Local" / "ms-playwright").glob("chromium-*/chrome-win64/chrome.exe"))
+    if not browser_paths:
+        pytest.skip("Playwright Chromium is not installed")
+
+    source = wiki / "pages" / "AI" / "rag" / "query-rewriting.md"
+    before = source.read_text(encoding="utf-8")
+    with run_server() as base_url, sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=str(browser_paths[-1]))
+        page = browser.new_page()
+        page.goto(base_url, wait_until="networkidle")
+        page.locator(".tree-dir", has_text="AI").click()
+        page.locator(".tree-dir", has_text="rag").click()
+        page.locator("#concept-tree").get_by_text("Query Rewriting 查询改写", exact=True).click()
+
+        page.get_by_role("button", name="学习笔记").click()
+        page.locator("#note-input").fill("我需要比较改写前后的召回结果，并说明对象、场景和约束为什么会改变检索。")
+        page.get_by_role("button", name="交给 Agent 整理").click()
+        detail = page.locator(".knowledge-detail")
+        detail.wait_for(state="visible")
+        assert "待审核" in detail.inner_text()
+        assert source.read_text(encoding="utf-8") == before
+
+        detail.get_by_role("button", name="确认并处理草案").click()
+        page.locator(".knowledge-applied").wait_for(state="visible")
+        assert "## 学习增量" in source.read_text(encoding="utf-8")
+        page.get_by_role("button", name="撤销这次更新").click()
+        page.get_by_text("已撤销", exact=True).wait_for(state="visible")
+        assert source.read_text(encoding="utf-8") == before
+        browser.close()
+
+
+@pytest.mark.ui
+def test_workspace_exposes_switchable_local_api_profiles(wiki):
+    browser_paths = sorted((Path.home() / "AppData" / "Local" / "ms-playwright").glob("chromium-*/chrome-win64/chrome.exe"))
+    if not browser_paths:
+        pytest.skip("Playwright Chromium is not installed")
+    with run_server() as base_url, sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=str(browser_paths[-1]))
+        page = browser.new_page()
+        page.goto(base_url, wait_until="networkidle")
+        page.get_by_role("button", name="资料与设置").click()
+        page.get_by_role("heading", name="学习助手 API").wait_for(state="visible")
+        page.locator("#llm-profile-name").fill("浏览器测试连接")
+        page.locator("#llm-base-url").fill("http://127.0.0.1:11434/v1")
+        page.locator("#llm-model").fill("example-local-model")
+        page.locator("#llm-api-key").fill("browser-test-secret")
+        page.get_by_role("button", name="保存并启用连接").click()
+        page.get_by_text("正在使用：浏览器测试连接", exact=True).wait_for(state="visible")
+        assert page.locator("#llm-api-key").input_value() == ""
         browser.close()
 
 

@@ -44,6 +44,34 @@ CREATE TABLE IF NOT EXISTS reflections (
     updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
+CREATE TABLE IF NOT EXISTS knowledge_updates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    page_path TEXT NOT NULL,
+    page_title TEXT NOT NULL,
+    persona TEXT NOT NULL DEFAULT 'feynman',
+    source_content TEXT NOT NULL,
+    analysis_json TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    proposal TEXT NOT NULL,
+    proposed_title TEXT NOT NULL DEFAULT '',
+    target_mode TEXT,
+    target_path TEXT,
+    status TEXT NOT NULL DEFAULT 'draft', -- draft | applied | kept_local | undone
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS wiki_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    knowledge_update_id INTEGER NOT NULL REFERENCES knowledge_updates(id) ON DELETE CASCADE,
+    page_path TEXT NOT NULL,
+    before_content TEXT NOT NULL,
+    after_content TEXT NOT NULL,
+    created_page INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    undone_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS gaps (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -107,6 +135,9 @@ CREATE INDEX IF NOT EXISTS idx_notes_page_path ON notes(page_path);
 CREATE INDEX IF NOT EXISTS idx_reflections_created ON reflections(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_reflections_page_path ON reflections(page_path);
 CREATE INDEX IF NOT EXISTS idx_reflections_session ON reflections(session_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_updates_page_path ON knowledge_updates(page_path);
+CREATE INDEX IF NOT EXISTS idx_knowledge_updates_created ON knowledge_updates(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_wiki_revisions_update ON wiki_revisions(knowledge_update_id);
 CREATE INDEX IF NOT EXISTS idx_gaps_session ON gaps(session_id);
 CREATE INDEX IF NOT EXISTS idx_cards_due ON cards(due);
 CREATE INDEX IF NOT EXISTS idx_cards_session ON cards(session_id);

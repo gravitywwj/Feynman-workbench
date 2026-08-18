@@ -15,6 +15,7 @@ def test_env_file_is_loaded_without_overriding_process_variables(tmp_path, monke
     env_file = tmp_path / ".env"
     env_file.write_text("DEEPSEEK_API_KEY=from-file\n", encoding="utf-8")
     monkeypatch.setattr(config, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(config, "LLM_SETTINGS_PATH", tmp_path / "llm-settings.json")
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     config.load_dotenv(env_file)
     assert config.get_llm_config()["api_key"] == "from-file"
@@ -28,6 +29,27 @@ def test_diagnose_falls_back_when_llm_call_fails(monkeypatch):
     monkeypatch.setattr(tutor, "_call_llm", lambda *_: (_ for _ in ()).throw(RuntimeError("offline")))
     _, _, source = tutor.diagnose("这是一个足够长的解释，包含原因和一个例子，例如用于检索任务。", "查询改写", "<p>reference</p>")
     assert source == "local"
+
+
+def test_recall_brief_and_knowledge_note_have_inspectable_local_fallbacks(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    brief = tutor.build_recall_brief(
+        title="查询改写", reference="# 查询改写\n查询改写会补足对象与场景。",
+        note="我不确定约束条件什么时候重要。", gaps=["需要说明机制"],
+        reflections=["下次用真实问题验证。"], persona="exam",
+    )
+    assert brief["persona"] == "exam"
+    assert brief["source"] == "local"
+    assert brief["question"]
+
+    update = tutor.analyze_knowledge_note(
+        note="我想比较改写前后的召回结果。", title="查询改写",
+        evidence=[{"title": "查询改写", "path": "AI/rag/query-rewriting.md", "excerpt": "补足对象和场景。"}],
+        persona="direct",
+    )
+    assert update["source"] == "local"
+    assert update["proposal"]
+    assert update["open_questions"]
 
 
 def test_diagnose_accepts_fenced_json(monkeypatch):

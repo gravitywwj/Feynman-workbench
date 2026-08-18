@@ -106,6 +106,71 @@ def recent_concepts(days: int = 14, today: date | None = None) -> list[dict]:
     return [concept for _, concept in recent]
 
 
+def read_page_markdown(path: str) -> tuple[dict, str]:
+    """Read one approved Wiki page as frontmatter and Markdown body.
+
+    Agent features use this instead of rendered HTML so quoted evidence remains
+    readable, inspectable and separate from presentation markup.
+    """
+    wiki = get_wiki_path()
+    candidate = Path(path)
+    if candidate.suffix != ".md" or candidate.is_absolute() or ".." in candidate.parts:
+        raise ValueError(f"非法页面路径: {path}")
+    file_path = wiki / "pages" / candidate
+    if not file_path.is_file():
+        raise FileNotFoundError(path)
+    return parse_frontmatter(file_path.read_text(encoding="utf-8"))
+
+
+def _search_terms(query: str) -> list[str]:
+    """Extract a small, explainable set of terms for local Wiki retrieval."""
+    normalized = unicodedata.normalize("NFKC", query).lower()
+    terms = re.findall(r"[a-z0-9_]{2,}|[\u4e00-\u9fff]{2,}", normalized)
+    unique: list[str] = []
+    for term in terms:
+        if term not in unique:
+            unique.append(term)
+    return unique[:12]
+
+
+def search_wiki(query: str, limit: int = 5) -> list[dict]:
+    """Search the connected Wiki locally and return short evidence excerpts.
+
+    This intentionally uses transparent lexical matching instead of pretending
+    a local search is semantic retrieval. The Agent receives only these visible
+    excerpts and must cite their pages in its answer.
+    """
+    terms = _search_terms(query)
+    if not terms:
+        return []
+    candidates: list[tuple[int, dict]] = []
+    for concept in scan_concepts():
+        try:
+            _, body = read_page_markdown(concept["path"])
+        except (OSError, UnicodeDecodeError, ValueError, FileNotFoundError):
+            continue
+        haystack = f"{concept['title']}\n{body}".lower()
+        title = concept["title"].lower()
+        score = sum(haystack.count(term) + (3 if term in title else 0) for term in terms)
+        if not score:
+            continue
+        excerpt = ""
+        for line in body.splitlines():
+            lowered = line.lower()
+            if any(term in lowered for term in terms):
+                excerpt = re.sub(r"\s+", " ", line).strip()
+                break
+        candidates.append((score, {
+            "path": concept["path"],
+            "title": concept["title"],
+            "section": concept["section"],
+            "excerpt": (excerpt or re.sub(r"\s+", " ", body).strip())[:320],
+            "matched_terms": [term for term in terms if term in haystack],
+        }))
+    candidates.sort(key=lambda item: (-item[0], item[1]["title"], item[1]["path"]))
+    return [item for _, item in candidates[:max(1, min(limit, 10))]]
+
+
 SAFE_TAGS = {
     "a", "blockquote", "br", "code", "del", "em", "h1", "h2", "h3", "h4", "h5", "h6",
     "hr", "img", "li", "ol", "p", "pre", "span", "strong", "table", "tbody", "td", "th",
@@ -248,15 +313,7 @@ def recommend_next_concept(path: str) -> dict | None:
 
 def render_page_html(path: str) -> tuple[dict, str]:
     """读取页面 → (meta, 正文 HTML)。wikilink 转成可点击样式（内部概念跳转）或不存在的目标转灰显。"""
-    wiki = get_wiki_path()
-    p = Path(path)
-    if p.suffix != ".md" or p.is_absolute() or ".." in p.parts:
-        raise ValueError(f"非法页面路径: {path}")
-    f = wiki / "pages" / p
-    if not f.is_file():
-        raise FileNotFoundError(path)
-    text = f.read_text(encoding="utf-8")
-    meta, body = parse_frontmatter(text)
+    meta, body = read_page_markdown(path)
 
     concepts = scan_concepts()
     by_path, by_stem = _wikilink_index(concepts)
