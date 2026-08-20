@@ -7,6 +7,8 @@ const state = {
   selected: null,        // 选中的概念对象
   currentMeta: null,     // 当前页面 meta（含 status/importance）
   searchMode: false,
+  librarySort: 'default',
+  libraryStatus: 'all',
   workspace: null,
 };
 
@@ -96,7 +98,7 @@ async function loadHomeAction() {
   const alternative = document.getElementById('btn-home-alternative');
   try {
     const action = await api('/api/study/home');
-    document.body.classList.toggle('home-mode', !state.selected);
+    setHomeDashboardVisible(!state.selected);
     title.textContent = action.title;
     detail.textContent = action.detail;
     button.disabled = action.type === 'empty';
@@ -119,11 +121,102 @@ async function loadHomeAction() {
       if (action.page_path) await selectConcept(action.page_path);
       if (action.type === 'continue') openRecall('simplify', action.session_id);
     };
+    if (!state.selected) loadHomeDashboard();
   } catch {
+    setHomeDashboardVisible(!state.selected);
     title.textContent = '从一个知识点开始';
     detail.textContent = '选择一个概念，完成回忆表达与诊断。';
     button.disabled = true;
     alternative.classList.add('hidden');
+  }
+}
+
+function setHomeDashboardVisible(active) {
+  document.body.classList.toggle('home-mode', active);
+  document.getElementById('dashboard-rail').classList.toggle('hidden', !active);
+  document.getElementById('default-right-rail').classList.toggle('hidden', active);
+}
+
+function dashboardExcerpt(value, limit = 52) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  return text.length > limit ? `${text.slice(0, limit)}…` : text;
+}
+
+function dashboardConceptRow(concept, urgent = false) {
+  const mastery = concept.mastery || {};
+  return `<button class="dashboard-row${urgent ? ' urgent' : ''}" type="button" data-dashboard-path="${esc(concept.path)}"><span>${esc(concept.title)}</span><small>${esc(mastery.detail || mastery.label || '继续补全理解')}</small></button>`;
+}
+
+function dashboardGapRow(gap) {
+  return `<button class="dashboard-row urgent" type="button" data-dashboard-path="${esc(gap.page_path)}"><span>${esc(dashboardExcerpt(gap.content))}</span><small>${esc(gap.page_title)} · 待你补充</small></button>`;
+}
+
+function renderHomeProgress(report) {
+  const completed = Number(report?.summary?.completed_sessions || 0);
+  const progress = document.getElementById('home-progress-bar');
+  progress.max = Math.max(5, completed || 1);
+  progress.value = completed;
+  document.getElementById('home-progress-value').textContent = `${completed} 次`;
+  document.getElementById('home-progress-hint').textContent = completed
+    ? `本周已完成 ${completed} 次回忆表达；下次请继续用自己的话讲清楚。`
+    : '本周还没有完成的回忆表达；从今天的这一个知识点开始。';
+}
+
+function renderMasteryChanges(report, stableCount) {
+  const summary = report?.summary || {};
+  const rows = [
+    `完成 ${Number(summary.completed_sessions || 0)} 次回忆表达`,
+    `补全 ${Number(summary.revised_gaps || 0)} 个盲区`,
+    `完成 ${Number(summary.reviews || 0)} 次间隔复习`,
+  ];
+  document.getElementById('dashboard-stable-count').textContent = `${stableCount} 稳`;
+  document.getElementById('dashboard-mastery-hint').textContent = report?.has_evidence
+    ? '只记录已完成的学习证据，不把阅读次数当成掌握。'
+    : '本周尚无新的掌握证据，完成一次回忆表达后会在这里留下变化。';
+  document.getElementById('dashboard-mastery-list').innerHTML = rows.map((row, index) =>
+    `<p class="dashboard-evidence${index === 0 && Number(summary.completed_sessions || 0) ? ' gained' : ''}">${esc(row)}</p>`
+  ).join('');
+}
+
+async function loadHomeDashboard() {
+  if (state.selected) return;
+  const gapsHint = document.getElementById('dashboard-gaps-hint');
+  const masteryHint = document.getElementById('dashboard-mastery-hint');
+  const needsHint = document.getElementById('dashboard-needs-hint');
+  try {
+    const [gapData, report] = await Promise.all([
+      api('/api/study/gaps?limit=100&status=open'),
+      api('/api/study/weekly-report'),
+    ]);
+    if (state.selected) return;
+    const gaps = gapData.gaps || [];
+    const stableCount = state.concepts.filter(concept => concept.mastery?.level === 'stable').length;
+    const levels = { unseen: 0, read: 1, recalled: 2, revised: 3, stable: 4 };
+    const openGapPaths = new Set(gaps.map(gap => gap.page_path));
+    const needs = state.concepts
+      .filter(concept => concept.mastery?.level !== 'stable' && !openGapPaths.has(concept.path))
+      .sort((a, b) => (levels[a.mastery?.level] ?? 9) - (levels[b.mastery?.level] ?? 9) || a.title.localeCompare(b.title, 'zh-Hans-CN'))
+      .slice(0, 2);
+
+    document.getElementById('dashboard-gap-count').textContent = String(gaps.length);
+    gapsHint.textContent = gaps.length
+      ? '先把这些说不清的地方补完整，再继续扩展新知识。'
+      : '暂时没有开放盲区；下一次回忆表达会继续帮你发现遗漏。';
+    document.getElementById('dashboard-gaps-list').innerHTML = gaps.slice(0, 2).map(dashboardGapRow).join('')
+      || '<p class="dashboard-empty">暂无待处理盲区。</p>';
+
+    renderMasteryChanges(report, stableCount);
+    document.getElementById('dashboard-needs-count').textContent = String(needs.length);
+    needsHint.textContent = needs.length
+      ? '这些知识点还没有形成稳定理解，适合安排下一次回忆表达。'
+      : '当前已收录的知识点都已有稳定记录，继续完成复习即可。';
+    document.getElementById('dashboard-needs-list').innerHTML = needs.map((concept, index) => dashboardConceptRow(concept, index === 0)).join('')
+      || '<p class="dashboard-empty">暂无需要补洞的知识点。</p>';
+    renderHomeProgress(report);
+  } catch (e) {
+    gapsHint.textContent = '暂时无法读取盲区摘要。';
+    masteryHint.textContent = '暂时无法读取掌握变化。';
+    needsHint.textContent = '暂时无法读取需要补洞的知识点。';
   }
 }
 
@@ -134,31 +227,48 @@ async function loadWorkspace() {
 }
 
 async function loadRecentNotes() {
-  const count = document.getElementById('recent-count');
-  const hint = document.getElementById('recent-hint');
-  const list = document.getElementById('recent-list');
+  const rail = {
+    count: document.getElementById('recent-count'),
+    hint: document.getElementById('recent-hint'),
+    list: document.getElementById('recent-list'),
+  };
+  const home = {
+    count: document.getElementById('home-update-count'),
+    hint: document.getElementById('home-update-hint'),
+    list: document.getElementById('home-update-list'),
+  };
   try {
     const data = await api('/api/concepts/recent?days=14&limit=5');
     if (data.total > 10) {
       const dates = [...new Set(data.concepts.map(concept => concept.created).filter(Boolean))];
-      count.textContent = `${data.total} 条`;
-      hint.textContent = `${dates[0] || '近期'} 一次导入 ${data.total} 条资料；阅读状态变化不会让旧笔记重新出现。完成学习后，此处会优先展示待补充与复习。`;
-      list.innerHTML = `<p class="recent-empty">已聚合本次批量导入，避免用旧资料长期占据提醒位。</p>`;
+      const batchHint = `${dates[0] || '近期'} 一次加入 ${data.total} 条资料；阅读状态变化不会让旧笔记重新出现。`;
+      rail.count.textContent = `${data.total} 条`;
+      rail.hint.textContent = `${batchHint} 完成学习后，此处会优先展示待补充与复习。`;
+      rail.list.innerHTML = `<p class="recent-empty">已聚合本次批量导入，避免用旧资料长期占据提醒位。</p>`;
+      home.count.textContent = `${data.total} 条`;
+      home.hint.textContent = `${batchHint} 已聚合显示，避免占满首页。`;
+      home.list.innerHTML = `<p class="home-update-empty">已聚合本次批量加入；可在左侧按加入时间继续查看。</p>`;
       return;
     }
-    count.textContent = data.total ? `${data.total} 条` : '暂无';
-    hint.textContent = `最近 ${data.days} 天首次加入的笔记。阅读状态变化不会让旧笔记重新出现。`;
-    list.innerHTML = data.concepts.map(concept => `
+    const items = data.concepts.map(concept => `
       <button class="recent-note" type="button" data-path="${esc(concept.path)}">
         <span>${esc(concept.title)}</span><small>${esc(concept.created)}</small>
-      </button>`).join('') || '<p class="recent-empty">最近没有带加入日期的新笔记。</p>';
-    list.querySelectorAll('.recent-note').forEach(button => {
+      </button>`).join('');
+    rail.count.textContent = data.total ? `${data.total} 条` : '暂无';
+    rail.hint.textContent = `最近 ${data.days} 天首次加入的笔记。阅读状态变化不会让旧笔记重新出现。`;
+    rail.list.innerHTML = items || '<p class="recent-empty">最近没有带加入日期的新笔记。</p>';
+    home.count.textContent = data.total ? `${data.total} 条` : '暂无';
+    home.hint.textContent = `最近 ${data.days} 天首次加入的笔记；普通编辑和阅读状态变化不会重复提醒。`;
+    home.list.innerHTML = items || '<p class="home-update-empty">最近没有带加入日期的新笔记。</p>';
+    document.querySelectorAll('#recent-list .recent-note, #home-update-list .recent-note').forEach(button => {
       button.addEventListener('click', () => selectConcept(button.dataset.path));
     });
   } catch (e) {
-    count.textContent = '—';
-    hint.textContent = '暂时无法读取新收录提醒。';
-    list.innerHTML = '';
+    [rail, home].forEach(target => {
+      target.count.textContent = '—';
+      target.hint.textContent = '暂时无法读取新收录提醒。';
+      target.list.innerHTML = '';
+    });
   }
 }
 
@@ -184,9 +294,9 @@ function impStars(imp) {
 }
 
 /* 构建树：{ name, children: Map, pages: [] } */
-function buildTree() {
+function buildTree(concepts = state.concepts) {
   const root = { name: '', path: '', children: new Map(), pages: [] };
-  for (const c of state.concepts) {
+  for (const c of concepts) {
     const parts = c.path.split('/');
     let node = root;
     for (let i = 0; i < parts.length - 1; i++) {
@@ -203,16 +313,59 @@ function buildTree() {
 
 function dirSort(a, b) { return a.name.localeCompare(b.name, 'zh-Hans-CN'); }
 
+function conceptSort(a, b) {
+  if (state.librarySort === 'created_desc' || state.librarySort === 'updated_desc') {
+    const field = state.librarySort === 'created_desc' ? 'created' : 'updated';
+    const byDate = String(b[field] || '').localeCompare(String(a[field] || ''));
+    if (byDate) return byDate;
+  }
+  return a.title.localeCompare(b.title, 'zh-Hans-CN');
+}
+
+function nodeLatestDate(node, field) {
+  let latest = '';
+  for (const page of node.pages) latest = String(page[field] || '') > latest ? String(page[field] || '') : latest;
+  for (const child of node.children.values()) {
+    const childLatest = nodeLatestDate(child, field);
+    latest = childLatest > latest ? childLatest : latest;
+  }
+  return latest;
+}
+
+function sortDirectories(nodes) {
+  if (state.librarySort !== 'created_desc' && state.librarySort !== 'updated_desc') return [...nodes].sort(dirSort);
+  const field = state.librarySort === 'created_desc' ? 'created' : 'updated';
+  return [...nodes].sort((a, b) =>
+    nodeLatestDate(b, field).localeCompare(nodeLatestDate(a, field)) || dirSort(a, b));
+}
+
+function visibleLibraryConcepts() {
+  return state.libraryStatus === 'all'
+    ? state.concepts
+    : state.concepts.filter(concept => concept.status === state.libraryStatus);
+}
+
+function syncLibraryControls() {
+  document.getElementById('library-sort').value = state.librarySort;
+  document.querySelectorAll('[data-library-status]').forEach(button => {
+    const active = button.dataset.libraryStatus === state.libraryStatus;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+}
+
 let treeRoot = null;
 
 function renderTree() {
   const wrap = document.getElementById('concept-tree');
   const q = document.getElementById('search-input').value.trim().toLowerCase();
+  const concepts = visibleLibraryConcepts();
+  syncLibraryControls();
 
   if (q) {
     state.searchMode = true;
-    const hits = state.concepts.filter(c =>
-      c.title.toLowerCase().includes(q) || c.path.toLowerCase().includes(q));
+    const hits = concepts.filter(c =>
+      c.title.toLowerCase().includes(q) || c.path.toLowerCase().includes(q)).sort(conceptSort);
     wrap.innerHTML = hits.length
       ? hits.map(c => `
         <div class="search-result ${state.selected && state.selected.path === c.path ? 'selected' : ''}"
@@ -228,8 +381,8 @@ function renderTree() {
   }
 
   state.searchMode = false;
-  treeRoot = buildTree();
-  wrap.innerHTML = renderDir([...treeRoot.children.values()].sort(dirSort));
+  treeRoot = buildTree(concepts);
+  wrap.innerHTML = renderDir(sortDirectories(treeRoot.children.values()));
   bindTreeEvents(wrap);
 }
 
@@ -238,8 +391,8 @@ function renderDir(nodes) {
   for (const node of nodes) {
     const path = node.path;
     const isOpen = state.expanded.has(path);
-    const subDirs = [...node.children.values()].sort(dirSort);
-    const pages = [...node.pages].sort((a, b) => a.title.localeCompare(b.title, 'zh-Hans-CN'));
+    const subDirs = sortDirectories(node.children.values());
+    const pages = [...node.pages].sort(conceptSort);
     const childHtml = isOpen ? renderChildren(subDirs, pages) : '';
     html += `
       <div class="tree-dir ${isOpen ? 'open' : ''}" data-dir="${esc(path)}">
@@ -310,7 +463,7 @@ function bindTreeEvents(wrap) {
 /* ===== 选中概念 → 加载正文 ===== */
 async function selectConcept(path) {
   state.selected = state.concepts.find(c => c.path === path) || null;
-  document.body.classList.toggle('home-mode', !state.selected);
+  setHomeDashboardVisible(!state.selected);
   setConceptDrawer(false);
   renderTree();
   setStep(1);
@@ -2242,13 +2395,6 @@ async function openWorkspace() {
   await loadLlmSettings();
 }
 
-async function openApiSettings() {
-  await openWorkspace();
-  const section = document.getElementById('llm-settings');
-  section.scrollIntoView({ block: 'start', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
-  section.focus({ preventScroll: true });
-}
-
 function selectedWorkspaceMode() { return document.querySelector('input[name="workspace-mode"]:checked').value; }
 function syncWorkspaceFields() {
   const local = selectedWorkspaceMode() === 'local';
@@ -2309,6 +2455,16 @@ async function saveWorkspace() {
 
 /* ===== 事件绑定 ===== */
 document.getElementById('search-input').addEventListener('input', renderTree);
+document.getElementById('library-sort').addEventListener('change', (event) => {
+  state.librarySort = event.target.value;
+  renderTree();
+});
+document.querySelectorAll('[data-library-status]').forEach(button => {
+  button.addEventListener('click', () => {
+    state.libraryStatus = button.dataset.libraryStatus;
+    renderTree();
+  });
+});
 document.querySelectorAll('.act-btn').forEach(btn => {
   btn.addEventListener('click', () => onActClick(btn));
 });
@@ -2372,6 +2528,16 @@ document.getElementById('btn-mobile-history').addEventListener('click', () => {
 });
 document.getElementById('btn-weekly-report').addEventListener('click', showWeeklyReport);
 document.getElementById('btn-gaps').addEventListener('click', () => openHistory('gaps'));
+document.getElementById('btn-dashboard-gaps').addEventListener('click', () => openHistory('gaps'));
+document.getElementById('btn-dashboard-report').addEventListener('click', showWeeklyReport);
+document.getElementById('btn-dashboard-needs').addEventListener('click', () => {
+  document.getElementById('search-input').focus();
+  document.getElementById('search-input').scrollIntoView({ block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+});
+document.getElementById('dashboard-rail').addEventListener('click', (e) => {
+  const row = e.target.closest('[data-dashboard-path]');
+  if (row?.dataset.dashboardPath) selectConcept(row.dataset.dashboardPath);
+});
 document.getElementById('btn-close-history').addEventListener('click', () => {
   document.getElementById('history-modal').classList.add('hidden');
 });
@@ -2437,12 +2603,6 @@ document.getElementById('btn-review').addEventListener('click', () => {
   openReviewPlan();
 });
 document.getElementById('btn-mobile-review').addEventListener('click', () => openReviewPlan());
-document.getElementById('btn-api-settings').addEventListener('click', openApiSettings);
-document.getElementById('btn-mobile-api-settings').addEventListener('click', () => {
-  document.getElementById('mobile-menu').classList.add('hidden');
-  document.getElementById('btn-mobile-menu').setAttribute('aria-expanded', 'false');
-  openApiSettings();
-});
 document.getElementById('btn-workspace').addEventListener('click', openWorkspace);
 document.getElementById('btn-mobile-workspace').addEventListener('click', () => {
   document.getElementById('mobile-menu').classList.add('hidden');

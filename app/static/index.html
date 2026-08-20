@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>费曼学习工作台</title>
-<link rel="stylesheet" href="/static/style.css?v=20260818-api-profiles-2">
+<link rel="stylesheet" href="/static/style.css?v=20260819-home-reminder-filters">
 </head>
 <body>
 
@@ -34,8 +34,7 @@
       <button id="btn-history" class="btn btn-quiet" type="button">学习记录</button>
       <button id="btn-graph" class="btn btn-quiet">知识图谱</button>
       <button id="btn-review" class="btn btn-quiet">复习模块</button>
-      <button id="btn-api-settings" class="btn btn-quiet" type="button">API 连接</button>
-      <button id="btn-workspace" class="btn btn-quiet" type="button">资料与设置</button>
+      <button id="btn-workspace" class="btn btn-quiet" type="button">设置</button>
     </div>
     <button id="btn-mobile-menu" class="btn btn-quiet mobile-menu-button" type="button" aria-expanded="false" aria-controls="mobile-menu">更多</button>
   </div>
@@ -44,8 +43,7 @@
 <nav id="mobile-menu" class="mobile-menu hidden" aria-label="更多功能">
   <button id="btn-mobile-history" class="btn btn-quiet" type="button">学习记录</button>
   <button id="btn-mobile-theme" class="btn btn-quiet" type="button">切换夜间阅读</button>
-  <button id="btn-mobile-api-settings" class="btn btn-quiet" type="button">API 连接</button>
-  <button id="btn-mobile-workspace" class="btn btn-quiet" type="button">资料与设置</button>
+  <button id="btn-mobile-workspace" class="btn btn-quiet" type="button">设置</button>
 </nav>
 
 <main class="layout" id="layout-main">
@@ -57,8 +55,26 @@
     </div>
     <label class="search-label" for="search-input">搜索知识点</label>
     <input type="search" id="search-input" placeholder="搜索知识点" autocomplete="off">
+    <div class="library-tools" aria-label="知识库浏览工具">
+      <label class="library-sort-label" for="library-sort">
+        <span>排序</span>
+        <select id="library-sort">
+          <option value="default">资料库顺序</option>
+          <option value="created_desc">加入时间（新→旧）</option>
+          <option value="updated_desc">资料日期（新→旧）</option>
+          <option value="title_asc">标题（A→Z）</option>
+        </select>
+      </label>
+      <div class="library-status-filter" role="group" aria-label="按阅读状态筛选">
+        <span>筛选</span>
+        <button class="library-filter-btn active" type="button" data-library-status="all" aria-pressed="true">全部</button>
+        <button class="library-filter-btn" type="button" data-library-status="unread" aria-pressed="false">未读</button>
+        <button class="library-filter-btn" type="button" data-library-status="reading" aria-pressed="false">在读</button>
+        <button class="library-filter-btn" type="button" data-library-status="read" aria-pressed="false">已读</button>
+      </div>
+    </div>
     <div class="tree" id="concept-tree"></div>
-    <p class="library-note">圆点标记阅读状态；点击圆点可切换状态。</p>
+    <p class="library-note">圆点标记阅读状态；点击圆点可切换状态。资料日期只读取笔记 frontmatter，不读取阅读状态。</p>
   </aside>
 
   <section class="panel page-panel" id="page-panel">
@@ -69,6 +85,22 @@
       <p id="home-action-detail">只显示一件最值得现在完成的事。</p>
       <button id="btn-home-action" class="btn btn-primary" type="button" disabled>准备中</button>
       <button id="btn-home-alternative" class="text-btn hidden" type="button">换一个建议</button>
+      <div class="home-weekly-progress" aria-live="polite">
+        <div><span>本周回忆表达</span><b id="home-progress-value">0 / 5 次</b></div>
+        <progress id="home-progress-bar" max="5" value="0">0 / 5</progress>
+        <p id="home-progress-hint">完成一次回忆表达后，这里会记录本周的学习节奏。</p>
+      </div>
+      <section class="home-update-reminder" aria-labelledby="home-update-title" aria-live="polite">
+        <div class="home-update-head">
+          <div>
+            <p class="eyebrow">资料更新提醒</p>
+            <h3 id="home-update-title">近期新加入的笔记</h3>
+          </div>
+          <span id="home-update-count" class="badge">…</span>
+        </div>
+        <p id="home-update-hint">仅按笔记首次加入日期提醒；普通编辑和阅读状态变化不会重复出现。</p>
+        <div id="home-update-list" class="home-update-list"></div>
+      </section>
     </div>
 
     <div id="page-content" class="hidden">
@@ -154,6 +186,30 @@
   </section>
 
   <aside class="right-rail">
+    <div id="dashboard-rail" class="dashboard-rail hidden" aria-label="学习仪表盘摘要">
+      <section class="panel dashboard-record-card dashboard-gaps-card" aria-labelledby="dashboard-gaps-title">
+        <div class="panel-head"><h2 id="dashboard-gaps-title">待处理盲区</h2><span id="dashboard-gap-count" class="dashboard-count">0</span></div>
+        <p id="dashboard-gaps-hint">正在读取需要你补充说明的地方。</p>
+        <div id="dashboard-gaps-list" class="dashboard-list"></div>
+        <button id="btn-dashboard-gaps" class="text-btn" type="button">处理盲区</button>
+      </section>
+
+      <section class="panel dashboard-record-card" aria-labelledby="dashboard-mastery-title">
+        <div class="panel-head"><h2 id="dashboard-mastery-title">掌握变化</h2><span id="dashboard-stable-count" class="dashboard-count stable">0</span></div>
+        <p id="dashboard-mastery-hint">本周的掌握证据会在这里汇总。</p>
+        <div id="dashboard-mastery-list" class="dashboard-list"></div>
+        <button id="btn-dashboard-report" class="text-btn" type="button">查看本周报告</button>
+      </section>
+
+      <section class="panel dashboard-record-card dashboard-needs-card" aria-labelledby="dashboard-needs-title">
+        <div class="panel-head"><h2 id="dashboard-needs-title">需要补洞</h2><span id="dashboard-needs-count" class="dashboard-count">0</span></div>
+        <p id="dashboard-needs-hint">优先选择尚未形成稳定理解的知识点。</p>
+        <div id="dashboard-needs-list" class="dashboard-list"></div>
+        <button id="btn-dashboard-needs" class="text-btn" type="button">查看全部知识点</button>
+      </section>
+    </div>
+
+    <div id="default-right-rail" class="default-right-rail">
     <section class="panel path-card">
       <div class="panel-head"><h2>学习路径 · 费曼四步法</h2></div>
       <ol class="guide-list">
@@ -181,6 +237,7 @@
       <p id="review-rail-hint">正在检查今天的复习安排。</p>
       <button id="btn-review-start" class="btn btn-quiet">打开复习模块</button>
     </section>
+    </div>
   </aside>
 </main>
 <div id="concept-drawer-backdrop" class="concept-drawer-backdrop hidden" aria-hidden="true"></div>
@@ -409,7 +466,7 @@
 
 <div id="workspace-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="workspace-title">
   <div class="modal-card workspace-modal-card">
-    <div class="modal-head"><div><p class="eyebrow">资料与设置</p><h2 id="workspace-title">建立本地学习空间</h2></div><button class="btn-close" id="btn-close-workspace" type="button">关闭</button></div>
+    <div class="modal-head"><div><p class="eyebrow">设置</p><h2 id="workspace-title">建立本地学习空间</h2></div><button class="btn-close" id="btn-close-workspace" type="button">关闭</button></div>
     <p class="modal-hint">选择的资料、笔记和学习记录都保留在本机。只有开启 AI 深度诊断并配置密钥时，回顾文本才会发送给所选模型服务。</p>
     <fieldset class="workspace-choice"><legend>学习资料</legend>
       <label><input type="radio" name="workspace-mode" value="local" checked> 连接本地 Wiki</label>
@@ -444,6 +501,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20260818-api-profiles"></script>
+<script src="/static/app.js?v=20260819-home-reminder-filters"></script>
 </body>
 </html>

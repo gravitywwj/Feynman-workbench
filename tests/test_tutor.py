@@ -1,4 +1,13 @@
+import pytest
+
+from app import config
 from app.services import tutor
+
+
+@pytest.fixture(autouse=True)
+def isolate_saved_llm_profiles(tmp_path, monkeypatch):
+    """Tutor unit tests must not inherit the developer's local saved API profile."""
+    monkeypatch.setattr(config, "LLM_SETTINGS_PATH", tmp_path / "llm-settings.json")
 
 
 def test_diagnose_uses_local_rules_without_key(monkeypatch):

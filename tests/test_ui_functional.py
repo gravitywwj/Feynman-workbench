@@ -1,6 +1,7 @@
 """浏览器功能测试：验证学习流，不采集截图或做视觉断言。"""
 import time
 from contextlib import contextmanager
+from datetime import date
 from pathlib import Path
 from threading import Thread
 
@@ -160,7 +161,7 @@ def test_workspace_exposes_switchable_local_api_profiles(wiki):
         browser = playwright.chromium.launch(executable_path=str(browser_paths[-1]))
         page = browser.new_page()
         page.goto(base_url, wait_until="networkidle")
-        page.get_by_role("button", name="资料与设置").click()
+        page.get_by_role("button", name="设置").click()
         page.get_by_role("heading", name="学习助手 API").wait_for(state="visible")
         page.locator("#llm-profile-name").fill("浏览器测试连接")
         page.locator("#llm-base-url").fill("http://127.0.0.1:11434/v1")
@@ -217,6 +218,75 @@ def test_home_workspace_panels_share_height_and_concept_switch_animates(wiki):
         page.locator("#concept-tree").get_by_text("Query Rewriting 查询改写", exact=True).click()
         page.locator("#page-content").wait_for(state="visible")
         assert "content-enter" in (page.locator("#page-content").get_attribute("class") or "")
+        browser.close()
+
+
+@pytest.mark.ui
+def test_home_dashboard_surfaces_learning_records_and_keeps_actions_connected(wiki):
+    browser_paths = sorted((Path.home() / "AppData" / "Local" / "ms-playwright").glob("chromium-*/chrome-win64/chrome.exe"))
+    if not browser_paths:
+        pytest.skip("Playwright Chromium is not installed")
+
+    with run_server() as base_url, sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=str(browser_paths[-1]))
+        page = browser.new_page()
+        page.goto(base_url, wait_until="networkidle")
+
+        page.locator("#dashboard-rail").wait_for(state="visible")
+        assert page.get_by_role("heading", name="待处理盲区").is_visible()
+        assert page.get_by_role("heading", name="掌握变化").is_visible()
+        assert page.get_by_role("heading", name="需要补洞").is_visible()
+
+        page.get_by_role("button", name="处理盲区").click()
+        page.locator("#history-modal").wait_for(state="visible")
+        page.get_by_role("button", name="关闭", exact=True).click()
+
+        page.locator("#dashboard-needs-list .dashboard-row").first.click()
+        page.locator("#page-content").wait_for(state="visible")
+        assert page.locator("#dashboard-rail").is_hidden()
+        browser.close()
+
+
+@pytest.mark.ui
+def test_home_update_reminder_and_library_time_status_filters_are_actionable(wiki):
+    browser_paths = sorted((Path.home() / "AppData" / "Local" / "ms-playwright").glob("chromium-*/chrome-win64/chrome.exe"))
+    if not browser_paths:
+        pytest.skip("Playwright Chromium is not installed")
+
+    today = date.today().isoformat()
+    pages = wiki / "pages" / "AI"
+    (pages / "newer-note.md").write_text(
+        f"---\ntitle: 今日新资料\ncreated: {today}\nupdated: 2000-01-01\nstatus: unread\n---\n\n# 今日新资料\n",
+        encoding="utf-8",
+    )
+    (pages / "older-note.md").write_text(
+        "---\ntitle: 较早资料\ncreated: 2000-01-01\nupdated: 2099-01-01\nstatus: unread\n---\n\n# 较早资料\n",
+        encoding="utf-8",
+    )
+    with run_server() as base_url, sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=str(browser_paths[-1]))
+        page = browser.new_page()
+        page.goto(base_url, wait_until="networkidle")
+
+        page.locator("#home-update-list").get_by_text("今日新资料", exact=True).wait_for(state="visible")
+        assert "普通编辑和阅读状态变化不会重复提醒" in page.locator("#home-update-hint").inner_text()
+
+        page.locator("#library-sort").select_option("created_desc")
+        assert page.locator("#library-sort").input_value() == "created_desc"
+        page.locator('.tree-dir[data-dir="AI"]').click()
+        paths = page.locator("#concept-tree [data-path]").evaluate_all("els => els.map(el => el.dataset.path)")
+        assert paths.index("AI/newer-note.md") < paths.index("AI/older-note.md")
+
+        page.locator('[data-library-status="read"]').click()
+        page.locator("#search-input").fill("Agent Memory")
+        assert page.get_by_text("Agent Memory System", exact=True).is_visible()
+        page.locator('[data-library-status="unread"]').click()
+        assert not page.get_by_text("Agent Memory System", exact=True).is_visible()
+
+        page.locator("#search-input").fill("")
+        page.locator("#home-update-list").get_by_text("今日新资料", exact=True).click()
+        page.locator("#page-content").wait_for(state="visible")
+        assert page.locator("#page-title").inner_text() == "今日新资料"
         browser.close()
 
 
@@ -290,7 +360,7 @@ def test_first_run_demo_workspace_and_graph_list_are_actionable(wiki):
         browser = playwright.chromium.launch(executable_path=str(browser_paths[-1]))
         page = browser.new_page()
         page.goto(base_url, wait_until="networkidle")
-        page.get_by_role("button", name="资料与设置").click()
+        page.get_by_role("button", name="设置").click()
         page.get_by_role("radio", name="先体验两分钟示例").check()
         page.get_by_role("button", name="保存学习空间").click()
         page.get_by_role("button", name="知识图谱").click()
