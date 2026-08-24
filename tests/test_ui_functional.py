@@ -75,6 +75,8 @@ def test_reader_preferences_note_and_recall_flow(wiki):
         page.get_by_role("button", name="开始回忆表达").click()
         page.get_by_role("button", name="开始表达这个问题").click()
         page.locator("#recall-input").fill("查询改写会补充问题缺少的上下文和关键词，所以检索更容易命中真正需要的资料。例如把模糊问题补上对象、场景和约束条件。")
+        page.locator('input[name="recall-evidence-key"][value="mechanism"]').check()
+        page.locator('input[name="recall-evidence-key"][value="example"]').check()
         page.get_by_role("button", name="保存并生成诊断").click()
         page.get_by_role("button", name="补充后，用更简单的话再讲一次").click()
         page.locator("#simplify-input").fill("查询改写是把问题补充完整，让检索系统找得更准。例如加上对象和场景。")

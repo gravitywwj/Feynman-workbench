@@ -8,11 +8,63 @@ from collections import Counter
 from datetime import date, datetime, timedelta
 import json
 from pathlib import Path
+import re
 
 from app import config, db
 from app.services import mastery, review_coach, review_schedule, tutor, wiki_reader, wiki_writer
 
-MIN_EXPLANATION_LENGTH = 24
+MIN_REVIEW_ANSWER_LENGTH = 24
+MIN_GAP_REVISION_LENGTH = 24
+
+
+def _gap_learning_path(gap: dict) -> dict:
+    """Expose a small, stateful correction path without treating a first rewrite as proof."""
+    gap_type = tutor.normalize_gap_type(gap.get("gap_type"))
+    meta = tutor.gap_type_meta(gap_type)
+    practice_at = gap.get("practice_completed_at")
+    retest_due = str(gap.get("retest_due") or "")
+    retest_at = gap.get("retest_completed_at")
+    status = gap.get("status") or "open"
+    today = date.today().isoformat()
+    if status == "verified":
+        stage = "verified"
+        next_action = "已完成来源核对；按间隔复习继续保持。"
+    elif retest_at:
+        stage = "retest_recorded"
+        next_action = "异情境复测已保存，仍待依据原文或学习助手完成核对。"
+    elif practice_at and retest_due and retest_due <= today:
+        stage = "retest_ready"
+        next_action = "今天可用新情境复测，检验是否真的理解而不是记住原答案。"
+    elif practice_at:
+        stage = "retest_wait"
+        next_action = f"已完成两分钟微练习；{retest_due or '明天'}再换一个情境复测。"
+    else:
+        stage = "practice_ready"
+        next_action = "先完成一次两分钟微练习，再安排隔天异情境复测。"
+    return {
+        "type": gap_type,
+        "label": meta["label"],
+        "goal": meta["goal"],
+        "practice_minutes": 2,
+        "practice_prompt": meta["practice_prompt"],
+        "retest_prompt": str(gap.get("retest_prompt") or meta["retest_prompt"]),
+        "retest_due": retest_due or None,
+        "stage": stage,
+        "next_action": next_action,
+    }
+
+
+def _decorate_gap(row: object) -> dict:
+    gap = dict(row)
+    gap["gap_type"] = tutor.normalize_gap_type(gap.get("gap_type"))
+    gap["learning_path"] = _gap_learning_path(gap)
+    gap["evidence"] = {
+        "concept_missing": "先回到当前资料，补出概念的对象、目标和原文依据。",
+        "causal_error": "请回到当前资料，核对每一步怎样导致下一步，而不是只写结论。",
+        "boundary_missing": "请回到当前资料，补出成立条件、限制或反例。",
+        "transfer_failure": "请换一个场景检验规则能否迁移，不要只重复原例。",
+    }[gap["gap_type"]]
+    return gap
 
 
 def _validate_page(path: str) -> dict:
@@ -44,31 +96,99 @@ def build_recall_brief(page_path: str, persona: str = "feynman") -> dict:
     )
 
 
-def _cards_for(title: str, explanation: str, gaps: list[dict]) -> list[dict]:
+def _clean_card_source_line(line: str) -> str:
+    """Keep a small, human-readable piece of the connected Wiki as evidence."""
+    cleaned = line.strip()
+    cleaned = re.sub(r"^[-*+]\s+", "", cleaned)
+    cleaned = re.sub(r"^\d+[.)]\s+", "", cleaned)
+    cleaned = re.sub(r"!?(?:\[([^\]]+)\]\([^)]*\)|\[\[([^\]]+)\]\])", lambda match: match.group(1) or match.group(2) or "", cleaned)
+    cleaned = re.sub(r"[`*_>#]", "", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip(" -：")
+
+
+def _card_source_material(page_path: str, title: str) -> dict:
+    """Create an inspectable card reference from Wiki text, never learner prose."""
+    try:
+        _, body = wiki_reader.read_page_markdown(page_path)
+    except (FileNotFoundError, ValueError, OSError, UnicodeDecodeError):
+        return {
+            "reference_status": "needs_review",
+            "source_anchor": "原文不可读取",
+            "required_points": [],
+            "reference_excerpt": "",
+        }
+
+    anchor = title
+    points: list[str] = []
+    for raw_line in body.splitlines():
+        heading = re.match(r"^#{1,3}\s+(.+?)\s*$", raw_line.strip())
+        if heading:
+            anchor = _clean_card_source_line(heading.group(1)) or anchor
+            continue
+        point = _clean_card_source_line(raw_line)
+        if not point or point.startswith("相关：") or len(point) < 3 or point in points:
+            continue
+        points.append(point[:220])
+        if len(points) >= 3:
+            break
+    if not points:
+        return {
+            "reference_status": "needs_review",
+            "source_anchor": anchor,
+            "required_points": [],
+            "reference_excerpt": "",
+        }
+    return {
+        "reference_status": "source",
+        "source_anchor": anchor,
+        "required_points": points,
+        "reference_excerpt": "\n".join(points),
+    }
+
+
+def _cards_for(page_path: str, title: str, gaps: list[dict]) -> list[dict]:
+    material = _card_source_material(page_path, title)
+    source_suffix = f"（回到「{material['source_anchor']}」核对）" if material["reference_status"] == "source" else "（资料待回原文核对）"
     cards = [{
-        "question": f"用自己的话说明：{title} 是什么？",
-        "answer": explanation.strip()[:500],
+        "question": f"用自己的话说明：{title} 的定义或目标，以及关键机制。{source_suffix}",
+        "answer": material["reference_excerpt"],
+        **material,
     }]
     for gap in gaps[:2]:
         cards.append({
-            "question": f"针对「{title}」，补全这项检查：{gap['content']}",
-            "answer": "下次复习时，用自己的例子或机制说明来补全。",
+            "question": f"依据「{title}」的资料，回应这个待核对点：{gap['content']}",
+            "answer": material["reference_excerpt"],
+            **material,
         })
     return cards
 
 
-def create_session(page_path: str, explanation: str, elapsed_seconds: int = 0, persona: str = "feynman") -> dict:
+def create_session(
+    page_path: str, explanation: str, elapsed_seconds: int = 0, persona: str = "feynman",
+    evidence_keys: list[str] | None = None, uncertainty: str = "",
+) -> dict:
     """创建一轮讲解会话，并保存本地诊断、追问和初始复习卡。"""
-    if not explanation or len(explanation.strip()) < MIN_EXPLANATION_LENGTH:
-        raise ValueError(f"请至少写 {MIN_EXPLANATION_LENGTH} 个字符，再开始诊断。")
+    explanation = explanation.strip()
+    if not explanation:
+        raise ValueError("请先写下你的回忆表达，再开始诊断。")
+    # Earlier local clients did not send an evidence selection.  Preserve their
+    # records while requiring the current UI to submit selected observable proof.
+    evidence = (
+        tutor.require_understanding_evidence(explanation, evidence_keys)
+        if evidence_keys is not None else tutor.inspect_understanding_evidence(explanation)
+    )
+    uncertainty = uncertainty.strip()[:300]
     meta, reference_html = wiki_reader.render_page_html(page_path)
     title = meta.get("title") or page_path.rsplit("/", 1)[-1].removesuffix(".md")
-    gaps, question, diagnosis_source = tutor.diagnose(explanation, title, reference_html, persona)
+    gaps, question, diagnosis_source = tutor.diagnose(
+        explanation, title, reference_html, persona, uncertainty,
+    )
     today = date.today()
     with db.cursor() as cur:
         cur.execute(
-            "INSERT INTO sessions (page_path, page_title, concept, status, duration_seconds) VALUES (?, ?, ?, 'gaps', ?)",
-            (page_path, title, title, max(0, elapsed_seconds)),
+            "INSERT INTO sessions (page_path, page_title, concept, status, duration_seconds, evidence_json, uncertainty) "
+            "VALUES (?, ?, ?, 'gaps', ?, ?, ?)",
+            (page_path, title, title, max(0, elapsed_seconds), json.dumps(evidence["selected"], ensure_ascii=False), uncertainty),
         )
         session_id = cur.lastrowid
         cur.execute("INSERT INTO turns (session_id, role, content) VALUES (?, 'user', ?)", (session_id, explanation.strip()))
@@ -78,10 +198,14 @@ def create_session(page_path: str, explanation: str, elapsed_seconds: int = 0, p
                 "INSERT INTO gaps (session_id, gap_type, content) VALUES (?, ?, ?)",
                 (session_id, gap["gap_type"], gap["content"]),
             )
-        for card in _cards_for(title, explanation, gaps):
+        for card in _cards_for(page_path, title, gaps):
             cur.execute(
-                "INSERT INTO cards (session_id, question, answer, due) VALUES (?, ?, ?, ?)",
-                (session_id, card["question"], card["answer"], review_schedule.initial_due(today)),
+                "INSERT INTO cards (session_id, question, answer, reference_status, source_anchor, required_points_json, reference_excerpt, due) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    session_id, card["question"], card["answer"], card["reference_status"], card["source_anchor"],
+                    json.dumps(card["required_points"], ensure_ascii=False), card["reference_excerpt"], review_schedule.initial_due(today),
+                ),
             )
     detail = session_detail(session_id)
     detail["diagnosis_source"] = diagnosis_source
@@ -89,6 +213,8 @@ def create_session(page_path: str, explanation: str, elapsed_seconds: int = 0, p
     detail["diagnosis"] = {
         "strengths": structure["strengths"],
         "checks": structure["checks"],
+        "understanding_evidence": evidence,
+        "uncertainty": uncertainty,
         "next_task": question,
         "source": diagnosis_source,
         "confidence": "reference_checked" if diagnosis_source == "llm" else "structure_only",
@@ -102,36 +228,40 @@ def session_detail(session_id: int) -> dict:
         if not session:
             raise LookupError("学习会话不存在")
         turns = cur.execute("SELECT id, role, content, created_at FROM turns WHERE session_id = ? ORDER BY id", (session_id,)).fetchall()
-        gaps = cur.execute("SELECT id, gap_type, content, status, revision FROM gaps WHERE session_id = ? ORDER BY id", (session_id,)).fetchall()
-        cards = cur.execute("SELECT id, question, answer, due, interval, reps FROM cards WHERE session_id = ? ORDER BY id", (session_id,)).fetchall()
+        gaps = cur.execute(
+            "SELECT id, gap_type, content, status, revision, practice_completed_at, retest_due, retest_prompt, retest_answer, retest_completed_at "
+            "FROM gaps WHERE session_id = ? ORDER BY id", (session_id,)
+        ).fetchall()
+        cards = cur.execute(
+            "SELECT id, question, answer, reference_status, source_anchor, required_points_json, reference_excerpt, due, interval, reps "
+            "FROM cards WHERE session_id = ? ORDER BY id", (session_id,)
+        ).fetchall()
         feedback = cur.execute(
             "SELECT gap_id, verdict FROM diagnosis_feedback WHERE session_id = ? ORDER BY id", (session_id,)
         ).fetchall()
-    gap_items = db.rows_to_dicts(gaps)
-    for gap in gap_items:
-        gap["evidence"] = {
-            "missing": "回答中缺少这个检查项，请回到当前学习资料核对。",
-            "wrong": "请回到当前学习资料核对这处可能的误解。",
-            "vague": "回答结构不足以核对，请回到当前学习资料补足解释。",
-        }.get(gap["gap_type"], "请回到当前学习资料核对。")
+    gap_items = [_decorate_gap(row) for row in gaps]
+    session_item = dict(session)
+    session_item["evidence_keys"] = _decode_json(session_item.pop("evidence_json", "[]"), [])
     return {
-        "session": dict(session), "turns": db.rows_to_dicts(turns), "gaps": gap_items,
-        "cards": db.rows_to_dicts(cards), "diagnosis_feedback": db.rows_to_dicts(feedback),
+        "session": session_item, "turns": db.rows_to_dicts(turns), "gaps": gap_items,
+        "cards": _decorate_cards(cards), "diagnosis_feedback": db.rows_to_dicts(feedback),
     }
 
 
 def complete_session(session_id: int, explanation: str, elapsed_seconds: int = 0) -> dict:
     """Store a second, simpler expression and return an honest learning outcome."""
     explanation = explanation.strip()
-    if len(explanation) < MIN_EXPLANATION_LENGTH:
-        raise ValueError(f"请至少写 {MIN_EXPLANATION_LENGTH} 个字符，再保存第二次表达。")
+    if not explanation:
+        raise ValueError("请先写下第二次表达，再保存学习结果。")
     with db.cursor() as cur:
         session = cur.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
         if not session:
             raise LookupError("学习会话不存在")
         meta, reference_html = wiki_reader.render_page_html(session["page_path"])
         title = meta.get("title") or session["page_title"]
-        reevaluated_gaps, _, reevaluation_source = tutor.diagnose(explanation, title, reference_html)
+        reevaluated_gaps, _, reevaluation_source = tutor.diagnose(
+            explanation, title, reference_html, uncertainty=str(session["uncertainty"] or ""),
+        )
         cur.execute("INSERT INTO turns (session_id, role, content) VALUES (?, 'revision', ?)", (session_id, explanation))
         cur.execute("DELETE FROM gaps WHERE session_id = ? AND status = 'open'", (session_id,))
         for gap in reevaluated_gaps:
@@ -169,7 +299,7 @@ def complete_session(session_id: int, explanation: str, elapsed_seconds: int = 0
     improvements = [*added, *quality["new_points"], *quality["simplified"]]
     tradeoffs = [*removed, *quality["omitted_important"]]
     next_due = min((card["due"] for card in detail["cards"]), default=None)
-    recommended = wiki_reader.recommend_next_concept(detail["session"]["page_path"])
+    recommended = contextual_recommendation(exclude_path=detail["session"]["page_path"])
     return {
         **detail,
         "outcome": {
@@ -213,53 +343,135 @@ def record_diagnosis_feedback(session_id: int, gap_id: int | None, verdict: str)
     return {"id": feedback_id, "session_id": session_id, "gap_id": gap_id, "verdict": verdict}
 
 
+def _recent_gap_patterns(days: int = 14) -> dict[str, list[dict]]:
+    """Recent correction needs, grouped by page; it is evidence, not a mastery score."""
+    since = (date.today() - timedelta(days=max(1, days) - 1)).isoformat()
+    with db.cursor() as cur:
+        rows = cur.execute(
+            "SELECT sessions.page_path, gaps.gap_type, COUNT(*) AS total FROM gaps "
+            "JOIN sessions ON sessions.id = gaps.session_id "
+            "WHERE substr(gaps.created_at, 1, 10) >= ? AND gaps.status != 'verified' "
+            "GROUP BY sessions.page_path, gaps.gap_type",
+            (since,),
+        ).fetchall()
+    result: dict[str, list[dict]] = {}
+    for row in rows:
+        item = dict(row)
+        item["gap_type"] = tutor.normalize_gap_type(item["gap_type"])
+        result.setdefault(item["page_path"], []).append(item)
+    return result
+
+
+def _recommendation_candidates(*, exclude_path: str | None = None, limit: int = 4) -> list[dict]:
+    workspace = config.get_workspace_settings()
+    concepts = wiki_reader.scan_concepts()
+    patterns = _recent_gap_patterns()
+    level_score = {"unseen": 42, "read": 46, "recalled": 36, "checked": 16, "maintaining": 4}
+    try:
+        exam_days = (date.fromisoformat(workspace["exam_date"]) - date.today()).days if workspace.get("exam_date") else None
+    except ValueError:
+        exam_days = None
+    candidates = []
+    for concept in concepts:
+        if concept["path"] == exclude_path:
+            continue
+        mastery_info = concept.get("mastery", {})
+        level = mastery_info.get("level", "unseen")
+        open_gaps = int(mastery_info.get("open_gaps") or 0)
+        due_cards = int(mastery_info.get("due_cards") or 0)
+        confidence = mastery_info.get("self_confidence")
+        section_weight = int(workspace.get("section_weights", {}).get(concept.get("section", ""), 3))
+        recent = patterns.get(concept["path"], [])
+        recent_total = sum(int(item["total"]) for item in recent)
+        score = level_score.get(level, 30) + open_gaps * 14 + due_cards * 18 + (section_weight - 1) * 7 + recent_total * 9
+        if confidence:
+            score += (6 - int(confidence)) * 7
+        if workspace.get("learning_goal") == "presentation" and concept.get("importance") == "high":
+            score += 16
+        if workspace.get("learning_goal") == "exam":
+            score += 8 if concept.get("importance") == "high" else 0
+            if exam_days is not None:
+                score += max(0, 28 - exam_days)
+        reasons = []
+        state_reason = {
+            "unseen": "还没有学习证据",
+            "read": "已阅读但未完成回忆表达",
+            "recalled": "有回忆表达但尚未来源核对",
+            "checked": "已核对，适合巩固保持",
+            "maintaining": "正在保持中",
+        }.get(level, "需要补充学习证据")
+        reasons.append(state_reason)
+        if open_gaps:
+            reasons.append(f"有 {open_gaps} 个待修复盲区")
+        if confidence:
+            reasons.append(f"自评把握度 {confidence}/5")
+        else:
+            reasons.append("尚未标记把握度")
+        if recent:
+            labels = "、".join(dict.fromkeys(tutor.gap_type_meta(item["gap_type"])["label"] for item in recent))
+            reasons.append(f"近两周出现过{labels}")
+        if section_weight >= 4:
+            reasons.append(f"章节权重 {section_weight}/5")
+        if workspace.get("learning_goal") == "exam" and exam_days is not None:
+            reasons.append(f"距考试 {exam_days} 天")
+        estimated = min(22, 6 + min(open_gaps, 2) * 3 + (2 if level in {"unseen", "read"} else 0))
+        available = int(workspace.get("available_minutes") or 25)
+        benefit = (
+            f"完成后会留下{('一次回忆表达' if level in {'unseen', 'read'} else '一次可核对的复述')}，"
+            f"并把下一步缩小为{'盲区微练习' if open_gaps else '一次间隔复习'}。"
+        )
+        candidates.append({
+            "path": concept["path"], "title": concept["title"], "section": concept.get("section", ""),
+            "score": score, "why": "；".join(reasons) + "。", "recommendation_reason": "；".join(reasons) + "。",
+            "estimated_minutes": estimated, "fits_today": estimated <= available, "available_minutes": available,
+            "benefit": benefit, "learning_goal": workspace.get("learning_goal"),
+        })
+    return sorted(candidates, key=lambda item: (-item["score"], item["title"], item["path"]))[:limit]
+
+
+def contextual_recommendation(*, exclude_path: str | None = None) -> dict | None:
+    candidates = _recommendation_candidates(exclude_path=exclude_path, limit=1)
+    return candidates[0] if candidates else None
+
+
 def today_action() -> dict:
-    """Return the one learning action that deserves the home screen."""
+    """Return one transparent action based on evidence and user-supplied study context."""
     workspace = config.get_workspace_settings()
     if not workspace["configured"]:
         return {
-            "type": "configure",
-            "title": "先连接你的学习资料",
+            "type": "configure", "title": "先连接你的学习资料",
             "detail": "选择一个包含 pages 的本地 Wiki，或先用两分钟示例体验一次回忆表达。",
         }
     due_cards = list_due_cards(1)
     if due_cards:
         summary = review_summary()
         return {
-            "type": "review",
-            "title": "完成今天的间隔复习",
+            "type": "review", "title": "完成今天的间隔复习",
             "detail": f"今天目标 {summary['goal']} 张，已完成 {summary['completed']} 张；还有 {summary['total']} 张需要回忆。",
+            "reason": "scheduled_review", "estimated_minutes": min(summary["estimated_minutes"], workspace["available_minutes"]),
+            "benefit": "完成后会更新间隔安排，并为保持状态留下新的回忆证据。",
         }
     with db.cursor() as cur:
         session = cur.execute(
             "SELECT id, page_path, page_title FROM sessions WHERE status != 'done' ORDER BY updated_at DESC, id DESC LIMIT 1"
         ).fetchone()
     if session:
-        return {"type": "continue", "title": f"继续处理：{session['page_title']}", "detail": "上次已经完成第一次表达。现在补充并用更简单的话再讲一次。", "session_id": session["id"], "page_path": session["page_path"]}
-    concepts = wiki_reader.scan_concepts()
-    choices = mastery.weakest_first(concepts)
-    if choices:
-        offset = 0
-        if workspace.get("learning_goal") == "presentation":
-            high_priority = [item for item in choices if item.get("importance") == "high"]
-            concept = high_priority[0] if high_priority else choices[0]
-        elif workspace.get("learning_goal") == "exam" and len(choices) > 1:
-            offset = 1
-            concept = choices[offset]
-        else:
-            concept = choices[0]
-        reason = {
-            "unseen": "它尚未留下阅读或回忆证据，因此从这里开始。",
-            "read": "它已读完但还没有回忆表达，现在适合合上资料尝试重建。",
-            "recalled": "它已有第一次表达，下一步应继续完成二次复述。",
-            "revised": "它已完成二次表达，等待复习计划安排巩固。",
-            "stable": "目前没有更紧急的待处理概念。",
-        }[concept.get("mastery", {}).get("level", "unseen")]
-        alternatives = [item for item in choices if item["path"] != concept["path"]][:3]
         return {
-            "type": "start", "title": f"从「{concept['title']}」开始", "detail": f"{reason} 阅读后合上资料，用自己的话完成一次回忆表达。",
-            "page_path": concept["path"], "reason": "mastery_state", "learning_goal": workspace.get("learning_goal"),
-            "alternatives": [{"path": item["path"], "title": item["title"]} for item in alternatives],
+            "type": "continue", "title": f"继续处理：{session['page_title']}",
+            "detail": "上次已经完成第一次表达。现在补充并用更简单的话再讲一次。",
+            "session_id": session["id"], "page_path": session["page_path"], "estimated_minutes": 6,
+            "benefit": "完成后会留下第二次表达与待修复盲区，方便后续核对。",
+        }
+    choices = _recommendation_candidates(limit=4)
+    if choices:
+        concept = choices[0]
+        alternatives = choices[1:]
+        return {
+            "type": "start", "title": f"从「{concept['title']}」开始",
+            "detail": f"为什么是它：{concept['why']} 预计 {concept['estimated_minutes']} 分钟。完成后：{concept['benefit']}",
+            "page_path": concept["path"], "reason": "contextual_evidence", "learning_goal": workspace.get("learning_goal"),
+            "estimated_minutes": concept["estimated_minutes"], "benefit": concept["benefit"], "why": concept["why"],
+            "alternatives": [{key: item[key] for key in ("path", "title", "why", "estimated_minutes", "benefit")} for item in alternatives],
         }
     return {"type": "empty", "title": "还没有可学习的概念", "detail": "连接 Wiki 后，这里会给出今天最合适的下一步。"}
 
@@ -293,6 +505,15 @@ def _decorate_cards(rows: list) -> list[dict]:
             if card["overdue_days"]
             else "今天是本次间隔复习日"
         )
+        card["required_points"] = _decode_json(card.pop("required_points_json", "[]"), [])
+        status = card.get("reference_status") or "legacy"
+        card["reference_status"] = status
+        card["reference_label"] = {
+            "source": f"Wiki 原文 · {card.get('source_anchor') or '当前资料'}",
+            "needs_review": "资料待核对",
+            "legacy": "旧卡待回原文核对",
+        }.get(status, "资料待核对")
+        card["can_show_reference"] = status == "source" and bool(card.get("reference_excerpt"))
         cards.append(card)
     return cards
 
@@ -300,7 +521,7 @@ def _decorate_cards(rows: list) -> list[dict]:
 def list_due_cards(limit: int = 20) -> list[dict]:
     with db.cursor() as cur:
         rows = cur.execute(
-            "SELECT cards.*, sessions.page_title FROM cards JOIN sessions ON sessions.id = cards.session_id "
+            "SELECT cards.*, sessions.page_title, sessions.page_path FROM cards JOIN sessions ON sessions.id = cards.session_id "
             "WHERE due <= ? ORDER BY due, cards.id LIMIT ?",
             (date.today().isoformat(), limit),
         ).fetchall()
@@ -315,7 +536,7 @@ def list_review_queue(mode: str = "scheduled", limit: int = 20) -> list[dict]:
         return list_due_cards(limit)
     with db.cursor() as cur:
         rows = cur.execute(
-            "SELECT cards.*, sessions.page_title FROM cards JOIN sessions ON sessions.id = cards.session_id "
+            "SELECT cards.*, sessions.page_title, sessions.page_path FROM cards JOIN sessions ON sessions.id = cards.session_id "
             "ORDER BY CASE WHEN due <= ? THEN 0 ELSE 1 END, due, reps, cards.id LIMIT ?",
             (date.today().isoformat(), limit),
         ).fetchall()
@@ -386,8 +607,8 @@ def review_card(card_id: int, rating: str) -> dict:
 def assess_review_attempt(card_id: int, answer: str, agent: str) -> dict:
     """让指定教练检查一次主动回忆，并保存可追溯的反馈。"""
     answer = answer.strip()
-    if len(answer) < MIN_EXPLANATION_LENGTH:
-        raise ValueError(f"请至少写 {MIN_EXPLANATION_LENGTH} 个字符，再交给复习教练检查。")
+    if len(answer) < MIN_REVIEW_ANSWER_LENGTH:
+        raise ValueError(f"请至少写 {MIN_REVIEW_ANSWER_LENGTH} 个字符，再交给复习教练检查。")
     with db.cursor() as cur:
         row = cur.execute(
             "SELECT cards.*, sessions.page_title, sessions.page_path FROM cards "
@@ -400,20 +621,23 @@ def assess_review_attempt(card_id: int, answer: str, agent: str) -> dict:
         _, reference_html = wiki_reader.render_page_html(card["page_path"])
     except (FileNotFoundError, ValueError):
         reference_html = ""
-    verdict, feedback, follow_up, source = review_coach.assess(
-        answer, question=card["question"], expected=card["answer"], title=card["page_title"],
+    required_points = _decode_json(card.get("required_points_json"), [])
+    verdict, feedback, follow_up, source, evidence_level = review_coach.assess(
+        answer, question=card["question"], expected=card["answer"], required_points=required_points,
+        reference_status=card.get("reference_status") or "legacy", title=card["page_title"],
         reference_html=reference_html, agent=agent,
     )
     with db.cursor() as cur:
         cur.execute(
-            "INSERT INTO review_attempts (card_id, agent, answer, verdict, feedback, follow_up, source) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (card_id, agent, answer, verdict, feedback, follow_up, source),
+            "INSERT INTO review_attempts (card_id, agent, answer, verdict, feedback, follow_up, source, evidence_level) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (card_id, agent, answer, verdict, feedback, follow_up, source, evidence_level),
         )
         attempt_id = cur.lastrowid
     return {
         "id": attempt_id, "card_id": card_id, "agent": agent, "agent_name": review_coach.agent_profile(agent)["name"],
         "verdict": verdict, "feedback": feedback, "follow_up": follow_up, "source": source,
+        "evidence_level": evidence_level, "reference_status": card.get("reference_status") or "legacy",
     }
 
 
@@ -736,13 +960,13 @@ def list_gaps(limit: int = 50, status: str | None = None) -> list[dict]:
     params.append(limit)
     with db.cursor() as cur:
         rows = cur.execute(sql, params).fetchall()
-    return db.rows_to_dicts(rows)
+    return [_decorate_gap(row) for row in rows]
 
 
 def revise_gap(gap_id: int, revision: str) -> dict:
     revision = revision.strip()
-    if len(revision) < MIN_EXPLANATION_LENGTH:
-        raise ValueError(f"请至少写 {MIN_EXPLANATION_LENGTH} 个字符，说明你如何补全这个问题。")
+    if len(revision) < MIN_GAP_REVISION_LENGTH:
+        raise ValueError(f"请至少写 {MIN_GAP_REVISION_LENGTH} 个字符，说明你如何补全这个问题。")
     with db.cursor() as cur:
         row = cur.execute(
             "SELECT gaps.*, sessions.page_path, sessions.page_title FROM gaps "
@@ -751,39 +975,109 @@ def revise_gap(gap_id: int, revision: str) -> dict:
         if not row:
             raise LookupError("待澄清点不存在")
         gap = dict(row)
-    try:
-        _, reference_html = wiki_reader.render_page_html(gap["page_path"])
-    except (FileNotFoundError, ValueError):
-        reference_html = ""
-    status, feedback, source = tutor.assess_gap_revision(
-        revision, gap["content"], gap["page_title"], reference_html,
-    )
+    gap_type = tutor.normalize_gap_type(gap["gap_type"])
+    retest_due = (date.today() + timedelta(days=1)).isoformat()
+    retest_prompt = tutor.gap_type_meta(gap_type)["retest_prompt"]
     with db.cursor() as cur:
-        cur.execute("UPDATE gaps SET revision = ?, status = ? WHERE id = ?", (revision, status, gap_id))
+        cur.execute(
+            "UPDATE gaps SET revision = ?, status = 'revised', practice_completed_at = datetime('now', 'localtime'), "
+            "retest_due = ?, retest_prompt = ?, retest_answer = NULL, retest_completed_at = NULL WHERE id = ?",
+            (revision, retest_due, retest_prompt, gap_id),
+        )
         cur.execute("UPDATE sessions SET updated_at = datetime('now', 'localtime') WHERE id = ?", (gap["session_id"],))
         cur.execute(
-            "INSERT INTO learning_events (event_type, page_path, entity_id) VALUES ('gap_revised', ?, ?)",
+            "INSERT INTO learning_events (event_type, page_path, entity_id) VALUES ('gap_practiced', ?, ?)",
             (gap["page_path"], gap_id),
         )
         updated = cur.execute(
             "SELECT gaps.*, sessions.page_path, sessions.page_title FROM gaps "
             "JOIN sessions ON sessions.id = gaps.session_id WHERE gaps.id = ?", (gap_id,),
         ).fetchone()
-    result = dict(updated)
+    result = _decorate_gap(updated)
+    result.update({
+        "feedback": f"两分钟微练习已保存。明天（{retest_due}）会换一个情境再测；第一次补充不会被当成已核对答案。",
+        "assessment_source": "learning_path",
+    })
+    return result
+
+
+def retest_gap(gap_id: int, answer: str) -> dict:
+    """Check the second, deliberately different-situation response against the source."""
+    answer = answer.strip()
+    if len(answer) < MIN_GAP_REVISION_LENGTH:
+        raise ValueError(f"请至少写 {MIN_GAP_REVISION_LENGTH} 个字符，说明新情境下如何判断。")
+    with db.cursor() as cur:
+        row = cur.execute(
+            "SELECT gaps.*, sessions.page_path, sessions.page_title FROM gaps "
+            "JOIN sessions ON sessions.id = gaps.session_id WHERE gaps.id = ?", (gap_id,),
+        ).fetchone()
+        if not row:
+            raise LookupError("待澄清点不存在")
+        gap = dict(row)
+    if not gap.get("practice_completed_at"):
+        raise ValueError("请先完成两分钟微练习，再进行异情境复测。")
+    due = str(gap.get("retest_due") or "")
+    if due and due > date.today().isoformat():
+        raise ValueError(f"异情境复测将在 {due} 开放，先让记忆间隔一天。")
+    try:
+        _, reference_html = wiki_reader.render_page_html(gap["page_path"])
+    except (FileNotFoundError, ValueError):
+        reference_html = ""
+    status, feedback, source = tutor.assess_gap_revision(answer, gap["content"], gap["page_title"], reference_html)
+    with db.cursor() as cur:
+        cur.execute(
+            "UPDATE gaps SET retest_answer = ?, retest_completed_at = datetime('now', 'localtime'), status = ? WHERE id = ?",
+            (answer, status, gap_id),
+        )
+        cur.execute("UPDATE sessions SET updated_at = datetime('now', 'localtime') WHERE id = ?", (gap["session_id"],))
+        cur.execute(
+            "INSERT INTO learning_events (event_type, page_path, entity_id) VALUES ('gap_retested', ?, ?)",
+            (gap["page_path"], gap_id),
+        )
+        if status == "verified":
+            cur.execute(
+                "INSERT INTO learning_events (event_type, page_path, entity_id) VALUES ('gap_verified', ?, ?)",
+                (gap["page_path"], gap_id),
+            )
+        updated = cur.execute(
+            "SELECT gaps.*, sessions.page_path, sessions.page_title FROM gaps "
+            "JOIN sessions ON sessions.id = gaps.session_id WHERE gaps.id = ?", (gap_id,),
+        ).fetchone()
+    result = _decorate_gap(updated)
     result.update({"feedback": feedback, "assessment_source": source})
     return result
+
+
+def set_self_confidence(page_path: str, confidence: int) -> dict:
+    """Persist a learner-owned confidence signal; it influences ordering, never mastery labels."""
+    if not 1 <= confidence <= 5:
+        raise ValueError("把握度需要在 1 到 5 之间")
+    _validate_page(page_path)
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO self_assessments (page_path, confidence, updated_at) VALUES (?, ?, datetime('now', 'localtime')) "
+            "ON CONFLICT(page_path) DO UPDATE SET confidence = excluded.confidence, updated_at = excluded.updated_at",
+            (page_path, confidence),
+        )
+        cur.execute(
+            "INSERT INTO learning_events (event_type, page_path) VALUES ('confidence_set', ?)", (page_path,)
+        )
+    return {"page_path": page_path, "confidence": confidence}
 
 
 def export_learning_data() -> dict:
     """导出工作台学习记录与已确认写入的安全回档快照，不改写 Wiki 原文。"""
     tables = (
         "notes", "reflections", "sessions", "turns", "gaps", "cards", "reviews",
-        "review_attempts", "learning_events", "diagnosis_feedback", "knowledge_updates",
+        "review_attempts", "learning_events", "diagnosis_feedback", "knowledge_updates", "self_assessments",
         "wiki_revisions",
     )
     with db.cursor() as cur:
-        payload = {table: db.rows_to_dicts(cur.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()) for table in tables}
-    return {"format": "feynman-workbench-export", "version": 3, "exported_at": datetime.now().isoformat(timespec="seconds"), **payload}
+        payload = {
+            table: db.rows_to_dicts(cur.execute(f"SELECT * FROM {table} ORDER BY {'page_path' if table == 'self_assessments' else 'id'}").fetchall())
+            for table in tables
+        }
+    return {"format": "feynman-workbench-export", "version": 5, "exported_at": datetime.now().isoformat(timespec="seconds"), **payload}
 
 
 def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
@@ -795,11 +1089,11 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
     """
     if payload.get("format") != "feynman-workbench-export":
         raise ValueError("这不是费曼学习工作台导出的学习数据")
-    if payload.get("version") not in {1, 2, 3}:
+    if payload.get("version") not in {1, 2, 3, 4, 5}:
         raise ValueError("暂不支持该导出版本")
     names = (
         "notes", "reflections", "sessions", "turns", "gaps", "cards", "reviews",
-        "review_attempts", "learning_events", "diagnosis_feedback", "knowledge_updates",
+        "review_attempts", "learning_events", "diagnosis_feedback", "knowledge_updates", "self_assessments",
         "wiki_revisions",
     )
     source = {name: payload.get(name, []) for name in names}
@@ -807,7 +1101,7 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
         raise ValueError("导出数据的结构不正确")
     counts = {
         "notes": 0, "reflections": 0, "sessions": 0, "cards": 0, "events": 0,
-        "knowledge_updates": 0, "wiki_revisions": 0,
+        "knowledge_updates": 0, "wiki_revisions": 0, "self_assessments": 0,
     }
     if dry_run:
         return {
@@ -847,10 +1141,13 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
                 session_map[old_id] = existing["id"]
                 continue
             cur.execute(
-                "INSERT INTO sessions (page_path, page_title, concept, status, tutor_turns, duration_seconds, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO sessions (page_path, page_title, concept, status, tutor_turns, duration_seconds, evidence_json, uncertainty, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (page_path, page_title, str(session.get("concept") or page_title),
                  str(session.get("status") or "done"), int(session.get("tutor_turns") or 3), int(session.get("duration_seconds") or 0),
+                 json.dumps(session.get("evidence_keys", session.get("evidence_json", [])), ensure_ascii=False)
+                 if not isinstance(session.get("evidence_json"), str) else str(session.get("evidence_json") or "[]"),
+                 str(session.get("uncertainty") or "")[:300],
                  created_at or datetime.now().isoformat(timespec="seconds"),
                  str(session.get("updated_at") or created_at or datetime.now().isoformat(timespec="seconds"))),
             )
@@ -887,9 +1184,12 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
             new_session = session_map.get(gap.get("session_id")) if gap.get("session_id") in new_source_session_ids else None
             if new_session and str(gap.get("content", "")).strip():
                 cur.execute(
-                    "INSERT INTO gaps (session_id, gap_type, content, status, revision) VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO gaps (session_id, gap_type, content, status, revision, practice_completed_at, retest_due, retest_prompt, retest_answer, retest_completed_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (new_session, str(gap.get("gap_type") or "vague"), str(gap["content"]),
-                     str(gap.get("status") or "open"), gap.get("revision")),
+                     str(gap.get("status") or "open"), gap.get("revision"), gap.get("practice_completed_at"),
+                     gap.get("retest_due"), str(gap.get("retest_prompt") or "")[:1000], gap.get("retest_answer"),
+                     gap.get("retest_completed_at")),
                 )
         for card in source["cards"]:
             new_session = session_map.get(card.get("session_id")) if card.get("session_id") in new_source_session_ids else None
@@ -897,9 +1197,14 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
             if not new_session or not isinstance(old_id, int) or not str(card.get("question", "")).strip():
                 continue
             cur.execute(
-                "INSERT INTO cards (session_id, question, answer, interval, ease, due, reps) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (new_session, str(card["question"]), str(card.get("answer") or ""), int(card.get("interval") or 0),
-                 float(card.get("ease") or 2.5), str(card.get("due") or date.today().isoformat()), int(card.get("reps") or 0)),
+                "INSERT INTO cards (session_id, question, answer, reference_status, source_anchor, required_points_json, reference_excerpt, interval, ease, due, reps) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (new_session, str(card["question"]), str(card.get("answer") or ""),
+                 str(card.get("reference_status") or "legacy"), str(card.get("source_anchor") or "")[:200],
+                 json.dumps(card.get("required_points", card.get("required_points_json", [])), ensure_ascii=False)
+                 if not isinstance(card.get("required_points_json"), str) else str(card.get("required_points_json") or "[]"),
+                 str(card.get("reference_excerpt") or "")[:1200], int(card.get("interval") or 0), float(card.get("ease") or 2.5),
+                 str(card.get("due") or date.today().isoformat()), int(card.get("reps") or 0)),
             )
             card_map[old_id] = cur.lastrowid
             counts["cards"] += 1
@@ -911,10 +1216,11 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
             new_card = card_map.get(attempt.get("card_id"))
             if new_card and str(attempt.get("answer", "")).strip():
                 cur.execute(
-                    "INSERT INTO review_attempts (card_id, agent, answer, verdict, feedback, follow_up, source) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO review_attempts (card_id, agent, answer, verdict, feedback, follow_up, source, evidence_level) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (new_card, str(attempt.get("agent") or "feynman"), str(attempt["answer"]),
                      str(attempt.get("verdict") or "retry"), str(attempt.get("feedback") or ""),
-                     str(attempt.get("follow_up") or ""), str(attempt.get("source") or "local")),
+                     str(attempt.get("follow_up") or ""), str(attempt.get("source") or "local"),
+                     str(attempt.get("evidence_level") or "unverified")),
                 )
         for event in source["learning_events"]:
             path = str(event.get("page_path", ""))
@@ -934,6 +1240,23 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
                     else:
                         cur.execute("INSERT INTO learning_events (event_type, page_path, entity_id) VALUES (?, ?, ?)", (event_type, path, event.get("entity_id")))
                     counts["events"] += 1
+        for assessment in source["self_assessments"]:
+            page_path = str(assessment.get("page_path") or "")
+            try:
+                confidence = int(assessment.get("confidence"))
+            except (TypeError, ValueError):
+                continue
+            if not page_path or not 1 <= confidence <= 5:
+                continue
+            incoming_at = str(assessment.get("updated_at") or "")
+            existing = cur.execute("SELECT updated_at FROM self_assessments WHERE page_path = ?", (page_path,)).fetchone()
+            if not existing or (incoming_at and incoming_at > str(existing["updated_at"] or "")):
+                cur.execute(
+                    "INSERT INTO self_assessments (page_path, confidence, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(page_path) DO UPDATE SET confidence = excluded.confidence, updated_at = excluded.updated_at",
+                    (page_path, confidence, incoming_at or datetime.now().isoformat(timespec="seconds")),
+                )
+                counts["self_assessments"] += 1
         for feedback in source["diagnosis_feedback"]:
             new_session = session_map.get(feedback.get("session_id")) if feedback.get("session_id") in new_source_session_ids else None
             verdict = str(feedback.get("verdict") or "")
@@ -1001,7 +1324,7 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
 
 
 def weekly_report(today: date | None = None) -> dict:
-    """A learning report focused on corrections and durable understanding evidence."""
+    """A diagnostic weekly report: recurring patterns, checked progress, and few next actions."""
     current = today or date.today()
     start = (current - timedelta(days=6)).isoformat()
     end = current.isoformat()
@@ -1012,9 +1335,19 @@ def weekly_report(today: date | None = None) -> dict:
             (start, end),
         ).fetchall()
         gap_rows = cur.execute(
-            "SELECT gaps.content, gaps.status, sessions.page_title, sessions.page_path "
+            "SELECT gaps.content, gaps.gap_type, gaps.status, sessions.page_title, sessions.page_path, gaps.created_at "
             "FROM gaps JOIN sessions ON sessions.id = gaps.session_id "
             "ORDER BY gaps.id DESC LIMIT 100"
+        ).fetchall()
+        source_check_rows = cur.execute(
+            "SELECT sessions.page_path, MAX(sessions.page_title) AS page_title, COUNT(*) AS total "
+            "FROM review_attempts JOIN cards ON cards.id = review_attempts.card_id "
+            "JOIN sessions ON sessions.id = cards.session_id "
+            "WHERE review_attempts.verdict = 'pass' "
+            "AND review_attempts.evidence_level IN ('source_standard', 'source_reviewed') "
+            "AND substr(review_attempts.created_at, 1, 10) BETWEEN ? AND ? "
+            "GROUP BY sessions.page_path",
+            (start, end),
         ).fetchall()
     counter = Counter()
     by_path: dict[str, int] = Counter()
@@ -1022,30 +1355,74 @@ def weekly_report(today: date | None = None) -> dict:
         counter[event["event_type"]] += event["total"]
         by_path[event["page_path"]] += event["total"]
     repeated = Counter()
+    clusters = Counter()
+    cluster_titles: dict[tuple[str, str], str] = {}
     for gap in gap_rows:
         if gap["status"] != "verified":
             repeated[(gap["page_title"], gap["content"])] += 1
+        if str(gap["created_at"] or "")[:10] >= start:
+            normalized_type = tutor.normalize_gap_type(gap["gap_type"])
+            clusters[(gap["page_path"], normalized_type)] += 1
+            cluster_titles[(gap["page_path"], normalized_type)] = gap["page_title"]
     concepts = wiki_reader.scan_concepts()
     states = mastery.overview(concepts)
-    stable = [concept for concept in concepts if states[concept["path"]]["level"] == "stable"]
+    maintaining = [concept for concept in concepts if states[concept["path"]]["level"] == "maintaining"]
     corrections = [
         {"title": title, "gap": gap, "times": times}
         for (title, gap), times in repeated.most_common(5)
     ]
-    evidence_total = counter["session_done"] + counter["gap_revised"] + counter["review_rated"]
+    recurring_clusters = [
+        {
+            "path": path,
+            "title": cluster_titles[(path, gap_type)],
+            "gap_type": gap_type,
+            "label": tutor.gap_type_meta(gap_type)["label"],
+            "times": times,
+            "next_action": tutor.gap_type_meta(gap_type)["practice_prompt"],
+        }
+        for (path, gap_type), times in clusters.most_common(5)
+    ]
+    prior_gap_counts = Counter(gap["page_path"] for gap in gap_rows)
+    source_checks = {row["page_path"]: dict(row) for row in source_check_rows}
+    progress_evidence = []
+    for concept in concepts:
+        state = states[concept["path"]]
+        check = source_checks.get(concept["path"])
+        if check and prior_gap_counts[concept["path"]]:
+            progress_evidence.append({
+                "path": concept["path"], "title": concept["title"],
+                "evidence": f"此前记录过 {prior_gap_counts[concept['path']]} 个待澄清点；本周有 {check['total']} 次回答依据原文或明确要点通过核对。",
+                "level": state["label"],
+            })
+    priorities = [
+        {
+            "path": item["path"], "title": item["title"], "why": item["why"],
+            "estimated_minutes": item["estimated_minutes"], "benefit": item["benefit"],
+        }
+        for item in _recommendation_candidates(limit=3)
+    ]
+    evidence_total = (
+        counter["session_done"] + counter["gap_revised"] + counter["gap_practiced"]
+        + counter["gap_retested"] + counter["review_rated"]
+    )
     return {
         "range": {"start": start, "end": end},
         "has_evidence": bool(evidence_total),
         "evidence_total": evidence_total,
         "summary": {
             "completed_sessions": counter["session_done"],
-            "revised_gaps": counter["gap_revised"],
+            "revised_gaps": counter["gap_revised"] + counter["gap_practiced"],
             "reviews": counter["review_rated"],
-            "stable_concepts": len(stable),
+            "maintaining_concepts": len(maintaining),
         },
         "corrected_misconceptions": corrections,
         "repeated_gaps": [item for item in corrections if item["times"] > 1],
-        "stable_concepts": [{"title": item["title"], "path": item["path"]} for item in stable[:8]],
+        "maintaining_concepts": [{"title": item["title"], "path": item["path"]} for item in maintaining[:8]],
+        "diagnostic": {
+            "recurring_error_clusters": recurring_clusters,
+            "progress_evidence": progress_evidence[:5],
+            "next_week_priorities": priorities,
+        },
         "active_concepts": [
             {"path": path, "activity": total} for path, total in sorted(by_path.items(), key=lambda item: (-item[1], item[0]))[:8]
         ],
@@ -1062,6 +1439,7 @@ def list_orphaned_records() -> list[dict]:
             "UNION ALL SELECT page_path, page_title, updated_at AS last_activity FROM reflections WHERE page_path IS NOT NULL "
             "UNION ALL SELECT page_path, page_title, updated_at AS last_activity FROM knowledge_updates "
             "UNION ALL SELECT target_path, page_title, updated_at AS last_activity FROM knowledge_updates WHERE target_path IS NOT NULL"
+            " UNION ALL SELECT page_path, page_path AS page_title, updated_at AS last_activity FROM self_assessments"
             ") GROUP BY page_path"
         ).fetchall()
     orphaned = []
@@ -1084,8 +1462,9 @@ def relink_page(old_path: str, new_path: str) -> dict:
         has_records = cur.execute(
             "SELECT EXISTS(SELECT 1 FROM sessions WHERE page_path = ?) OR EXISTS(SELECT 1 FROM notes WHERE page_path = ?) "
             "OR EXISTS(SELECT 1 FROM reflections WHERE page_path = ?) OR EXISTS(SELECT 1 FROM knowledge_updates WHERE page_path = ?) "
-            "OR EXISTS(SELECT 1 FROM knowledge_updates WHERE target_path = ?) OR EXISTS(SELECT 1 FROM wiki_revisions WHERE page_path = ?)",
-            (old_path, old_path, old_path, old_path, old_path, old_path),
+            "OR EXISTS(SELECT 1 FROM knowledge_updates WHERE target_path = ?) OR EXISTS(SELECT 1 FROM wiki_revisions WHERE page_path = ?) "
+            "OR EXISTS(SELECT 1 FROM self_assessments WHERE page_path = ?)",
+            (old_path, old_path, old_path, old_path, old_path, old_path, old_path),
         ).fetchone()[0]
         if not has_records:
             raise LookupError("旧页面没有可重新关联的学习记录。")
@@ -1099,4 +1478,5 @@ def relink_page(old_path: str, new_path: str) -> dict:
         cur.execute("UPDATE knowledge_updates SET page_path = ?, page_title = ? WHERE page_path = ?", (new_path, title, old_path))
         cur.execute("UPDATE knowledge_updates SET target_path = ? WHERE target_path = ?", (new_path, old_path))
         cur.execute("UPDATE wiki_revisions SET page_path = ? WHERE page_path = ?", (new_path, old_path))
+        cur.execute("UPDATE self_assessments SET page_path = ? WHERE page_path = ?", (new_path, old_path))
     return {"old_path": old_path, "new_path": new_path, "title": title}

@@ -36,21 +36,38 @@ def _keywords(text: str) -> list[str]:
     return [word for word in words if word not in ignored][:18]
 
 
-def local_assessment(answer: str, expected: str, agent: str) -> tuple[str, str, str]:
-    """离线时只判断回答的可检索性，不冒充事实核验。"""
+def _matched_required_points(answer: str, required_points: list[str]) -> list[str]:
+    answer_words = set(_keywords(answer))
+    matched = []
+    for point in required_points:
+        point_words = set(_keywords(point))
+        if point_words and answer_words & point_words:
+            matched.append(point)
+    return matched
+
+
+def local_assessment(
+    answer: str, required_points: list[str], agent: str, *, reference_ready: bool,
+) -> tuple[str, str, str, bool]:
+    """Check explicit Wiki points offline without pretending to judge all facts."""
     normalized = answer.strip()
-    expected_words = set(_keywords(expected))
-    answer_words = set(_keywords(normalized))
-    overlap = len(expected_words & answer_words)
-    has_example = bool(re.search(r"例如|比如|举例|场景|好比", normalized))
-    complete = len(normalized) >= 60 and (overlap >= 2 or has_example)
+    if not reference_ready or not required_points:
+        return (
+            "retry",
+            "这张卡没有保留足够的 Wiki 来源，不能把历史表达当作标准答案。请回原文核对后再评分。",
+            "打开原文，找出定义、步骤或条件，再写下你能确认的一点。",
+            False,
+        )
+    matched = _matched_required_points(normalized, required_points)
+    required_count = min(2, len(required_points))
+    complete = len(normalized) >= 24 and len(matched) >= required_count
     if agent == "strict":
         if complete:
-            return "pass", "结论：可以继续。你给出了可核对的解释；现在用资料确认术语和因果链是否准确。", "给出一个反例，说明它在什么情况下不适用。"
-        return "retry", "结论：不够。当前回答缺少可核对的机制、条件或例子，不能算掌握。不要重读整页，先补出其中一项。", "用两句话回答：它解决什么问题，靠什么机制做到？"
+            return "pass", f"结论：通过。你覆盖了 {len(matched)} 条 Wiki 要点；仍请回原文确认措辞与因果链。", "给出一个反例，说明它在什么情况下不适用。", True
+        return "retry", f"结论：未通过。需要对上至少 {required_count} 条 Wiki 要点；当前命中 {len(matched)} 条。", "打开原文，补上定义或机制中的一项，再重新作答。", False
     if complete:
-        return "pass", "你的回答已有可核对的结构。现在打开参考答案，补上最不确定的一处即可。", "尝试再用一个不同场景解释它。"
-    return "retry", "先别急着看答案。把概念、机制或例子中的任意一项讲具体一点，再来核对。", "它解决什么问题，又为什么能解决？"
+        return "pass", f"你已对上 {len(matched)} 条 Wiki 要点。打开原文，核对其中最不确定的一处。", "尝试再用一个不同场景解释它。", True
+    return "retry", f"先别急着评分。当前只对上 {len(matched)} 条 Wiki 要点，还需要至少 {required_count} 条。", "它解决什么问题，又为什么能解决？", False
 
 
 def _clean_json(content: str) -> dict:
@@ -61,13 +78,24 @@ def _clean_json(content: str) -> dict:
     return value
 
 
-def assess(answer: str, *, question: str, expected: str, title: str, reference_html: str, agent: str) -> tuple[str, str, str, str]:
-    """返回 verdict、反馈、下一问与来源；模型不可用时退回本地规则。"""
+def assess(
+    answer: str, *, question: str, expected: str, required_points: list[str], reference_status: str,
+    title: str, reference_html: str, agent: str,
+) -> tuple[str, str, str, str, str]:
+    """Return assessment plus the strength of its source-grounded evidence."""
     profile = agent_profile(agent)
+    reference_ready = reference_status == "source" and bool(required_points) and bool(reference_html.strip())
+    if not reference_ready:
+        verdict, feedback, follow_up, _ = local_assessment(
+            answer, required_points, agent, reference_ready=False,
+        )
+        return verdict, feedback, follow_up, "local", "unverified"
     config = get_llm_config()
     if config.get("mode") != "ai" or not config["api_key"]:
-        verdict, feedback, follow_up = local_assessment(answer, expected, agent)
-        return verdict, feedback, follow_up, "local"
+        verdict, feedback, follow_up, standard_met = local_assessment(
+            answer, required_points, agent, reference_ready=True,
+        )
+        return verdict, feedback, follow_up, "local", "source_standard" if standard_met else "unverified"
     try:
         from openai import OpenAI
 
@@ -77,11 +105,12 @@ def assess(answer: str, *, question: str, expected: str, title: str, reference_h
             messages=[
                 {"role": "system", "content": (
                     f"你是{profile['name']}。{profile['instruction']}只依据参考资料判断，不编造。"
+                    "只有学习者回答覆盖必备要点且与资料一致，才可通过。"
                     "返回纯 JSON：{\"verdict\":\"pass|retry\",\"feedback\":\"不超过90字\",\"follow_up\":\"一个下一问\"}。"
                 )},
                 {"role": "user", "content": (
                     f"知识点：{title}\n参考资料：{_plain_text(reference_html)[:10000]}\n"
-                    f"复习题：{question}\n参考答案或学习记录：{expected[:1200]}\n学习者回答：{answer[:5000]}"
+                    f"复习题：{question}\n来源摘要：{expected[:1200]}\n必备要点：{'；'.join(required_points[:4])}\n学习者回答：{answer[:5000]}"
                 )},
             ],
         )
@@ -91,7 +120,9 @@ def assess(answer: str, *, question: str, expected: str, title: str, reference_h
         follow_up = str(payload.get("follow_up", "")).strip()[:300]
         if verdict not in {"pass", "retry"} or not feedback or not follow_up:
             raise ValueError("复习教练反馈不完整")
-        return verdict, feedback, follow_up, "llm"
+        return verdict, feedback, follow_up, "llm", "source_reviewed" if verdict == "pass" else "unverified"
     except Exception:
-        verdict, feedback, follow_up = local_assessment(answer, expected, agent)
-        return verdict, feedback, follow_up, "local"
+        verdict, feedback, follow_up, standard_met = local_assessment(
+            answer, required_points, agent, reference_ready=True,
+        )
+        return verdict, feedback, follow_up, "local", "source_standard" if standard_met else "unverified"

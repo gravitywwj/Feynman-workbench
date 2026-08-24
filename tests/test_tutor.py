@@ -68,7 +68,7 @@ def test_diagnose_accepts_fenced_json(monkeypatch):
     monkeypatch.setattr(tutor, "_call_llm", lambda *_: "```json\n{\"gaps\":[{\"gap_type\":\"missing\",\"content\":\"补一个例子\"}],\"question\":\"下一问\"}\n```")
     gaps, question, source = tutor.diagnose("足够长的讲解，包含原因和场景，例如用于检索任务。", "查询改写", "<p>reference</p>")
     assert source == "llm"
-    assert gaps == [{"gap_type": "missing", "content": "补一个例子"}]
+    assert gaps == [{"gap_type": "concept_missing", "content": "补一个例子"}]
     assert question == "下一问"
 
 

@@ -110,7 +110,7 @@ async function loadHomeAction() {
       if (!next) return;
       action.page_path = next.path;
       action.title = `改为从「${next.title}」开始`;
-      action.detail = '这是同一优先级中的另一项建议；你可以按当前目标自由选择。';
+      action.detail = `为什么是它：${next.why || '这是同一优先级中的另一项建议。'} 预计 ${next.estimated_minutes || '几'} 分钟。完成后：${next.benefit || '会留下新的学习证据。'}`;
       action.alternatives = action.alternatives.slice(1);
       title.textContent = action.title; detail.textContent = action.detail;
       alternative.classList.toggle('hidden', !action.alternatives.length);
@@ -162,14 +162,14 @@ function renderHomeProgress(report) {
     : '本周还没有完成的回忆表达；从今天的这一个知识点开始。';
 }
 
-function renderMasteryChanges(report, stableCount) {
+function renderMasteryChanges(report, maintainingCount) {
   const summary = report?.summary || {};
   const rows = [
     `完成 ${Number(summary.completed_sessions || 0)} 次回忆表达`,
     `补全 ${Number(summary.revised_gaps || 0)} 个盲区`,
     `完成 ${Number(summary.reviews || 0)} 次间隔复习`,
   ];
-  document.getElementById('dashboard-stable-count').textContent = `${stableCount} 稳`;
+  document.getElementById('dashboard-maintaining-count').textContent = `${maintainingCount} 保持`;
   document.getElementById('dashboard-mastery-hint').textContent = report?.has_evidence
     ? '只记录已完成的学习证据，不把阅读次数当成掌握。'
     : '本周尚无新的掌握证据，完成一次回忆表达后会在这里留下变化。';
@@ -190,11 +190,11 @@ async function loadHomeDashboard() {
     ]);
     if (state.selected) return;
     const gaps = gapData.gaps || [];
-    const stableCount = state.concepts.filter(concept => concept.mastery?.level === 'stable').length;
-    const levels = { unseen: 0, read: 1, recalled: 2, revised: 3, stable: 4 };
+    const maintainingCount = state.concepts.filter(concept => concept.mastery?.level === 'maintaining').length;
+    const levels = { unseen: 0, read: 1, recalled: 2, checked: 3, maintaining: 4 };
     const openGapPaths = new Set(gaps.map(gap => gap.page_path));
     const needs = state.concepts
-      .filter(concept => concept.mastery?.level !== 'stable' && !openGapPaths.has(concept.path))
+      .filter(concept => concept.mastery?.level !== 'maintaining' && !openGapPaths.has(concept.path))
       .sort((a, b) => (levels[a.mastery?.level] ?? 9) - (levels[b.mastery?.level] ?? 9) || a.title.localeCompare(b.title, 'zh-Hans-CN'))
       .slice(0, 2);
 
@@ -205,11 +205,11 @@ async function loadHomeDashboard() {
     document.getElementById('dashboard-gaps-list').innerHTML = gaps.slice(0, 2).map(dashboardGapRow).join('')
       || '<p class="dashboard-empty">暂无待处理盲区。</p>';
 
-    renderMasteryChanges(report, stableCount);
+    renderMasteryChanges(report, maintainingCount);
     document.getElementById('dashboard-needs-count').textContent = String(needs.length);
     needsHint.textContent = needs.length
-      ? '这些知识点还没有形成稳定理解，适合安排下一次回忆表达。'
-      : '当前已收录的知识点都已有稳定记录，继续完成复习即可。';
+      ? '这些知识点还没有形成可核对的理解，适合安排下一次回忆表达。'
+      : '当前已收录的知识点都已有保持记录，继续完成复习即可。';
     document.getElementById('dashboard-needs-list').innerHTML = needs.map((concept, index) => dashboardConceptRow(concept, index === 0)).join('')
       || '<p class="dashboard-empty">暂无需要补洞的知识点。</p>';
     renderHomeProgress(report);
@@ -586,6 +586,181 @@ function closeNotes() {
   document.getElementById('notes-modal').classList.add('hidden');
 }
 
+let ideaSelectedId = null;
+
+function ideaStatusLabel(status) {
+  return { open: '讨论中', draft: '待审核草稿', applied: '已写入 Wiki', kept_local: '仅本地保存', undone: '已撤销' }[status] || status;
+}
+
+function ideaListMarkup(item) {
+  const active = Number(item.id) === Number(ideaSelectedId);
+  return `<button class="idea-list-item ${active ? 'active' : ''}" type="button" data-idea-id="${item.id}" aria-pressed="${active}">
+    <span class="idea-status-dot ${esc(item.status)}" aria-hidden="true"></span><span><b>${esc(item.title)}</b><small>${esc(ideaStatusLabel(item.status))} · ${esc(item.updated_at || item.created_at || '')}</small></span>
+  </button>`;
+}
+
+function ideaAssessmentMarkup(assessment) {
+  if (!assessment?.verdict) return '';
+  const list = (items) => (items || []).map(item => `<li>${esc(item)}</li>`).join('') || '<li>暂未记录</li>';
+  return `<section class="idea-assessment">
+    <div class="idea-assessment-head"><span>暂定判断：${esc(assessment.verdict_label || '待验证')}</span><small>${esc(assessment.confidence || '低')}把握 · ${assessment.source === 'llm' ? '依据本地 Wiki 与对话' : '本地结构提示，未核验事实'}</small></div>
+    <p>${esc(assessment.summary || '')}</p>
+    <div class="idea-assessment-grid"><div><b>支持点</b><ul>${list(assessment.supporting_points)}</ul></div><div><b>疑点与前提</b><ul>${list(assessment.concerns)}</ul></div></div>
+    ${assessment.open_questions?.length ? `<div><b>开放问题</b><ul>${list(assessment.open_questions)}</ul></div>` : ''}
+    ${assessment.next_question ? `<p class="idea-next-question"><b>下一步：</b>${esc(assessment.next_question)}</p>` : ''}
+  </section>`;
+}
+
+function ideaTurnMarkup(turn) {
+  const meta = turn.metadata || {};
+  return `<article class="idea-turn ${turn.role === 'user' ? 'user' : 'agent'}"><span class="idea-turn-label">${turn.role === 'user' ? '我' : turn.kind === 'summary' ? 'Agent · 讨论总结' : 'Agent'}</span>${historyEscape(turn.content)}${turn.role === 'agent' ? ideaAssessmentMarkup(meta) : ''}</article>`;
+}
+
+function ideaComposeMarkup() {
+  const related = state.selected;
+  return `<div class="idea-compose">
+    <p class="eyebrow">新的想法</p><h3>先说出来，不必先证明它</h3>
+    <label class="field-label" for="idea-title-input">标题（可选）<input id="idea-title-input" maxlength="120" placeholder="例如：我怀疑上下文长度会改变检索策略"></label>
+    <label class="field-label" for="idea-input">想法内容<textarea id="idea-input" maxlength="10000" placeholder="描述你突然想到的判断、直觉、问题或项目联想…"></textarea></label>
+    <div class="voice-controls idea-voice-controls"><button id="btn-voice-idea" class="btn btn-quiet" type="button">开始口述</button><span id="idea-voice-status" aria-live="polite">可使用浏览器语音输入，也可继续键入。</span></div>
+    <label id="idea-related-label" class="idea-related ${related ? '' : 'hidden'}"><input id="idea-related-current" type="checkbox"> 关联当前学习页「<span id="idea-related-title">${esc(related?.title || '')}</span>」（可选）</label>
+    <div class="idea-compose-footer"><span id="idea-compose-status">想法会先保存为独立讨论，不会自动写入 Wiki。</span><button id="btn-create-idea" class="btn btn-primary" type="button">开始讨论</button></div>
+  </div>`;
+}
+
+function ideaDraftMarkup(item) {
+  if (!item.draft_content || !['draft', 'applied', 'kept_local', 'undone'].includes(item.status)) return '';
+  if (item.status === 'applied') return `<div class="idea-applied"><p>已写入 Wiki：<b>${esc(item.wiki_path || '')}</b></p><button class="btn btn-quiet btn-undo-idea" type="button" data-idea-id="${item.id}">撤销这次写入</button></div>`;
+  if (item.status === 'kept_local') return `<div class="idea-applied"><p>草稿已保留在本地。之后仍可从这里复制或继续整理。</p></div>`;
+  if (item.status === 'undone') return `<div class="idea-applied"><p>已撤销 Wiki 写入，原草稿仍保留在本地。</p></div>`;
+  return `<section class="idea-draft-card"><h4>可审核的 Wiki 草稿</h4>
+    <label class="field-label">页面标题<input id="idea-draft-title" maxlength="120" value="${esc(item.draft_title || item.title)}"></label>
+    <label class="field-label">页面正文<textarea id="idea-draft-content" maxlength="5000">${esc(item.draft_content)}</textarea></label>
+    <p class="knowledge-safeguard">草稿不会自动写入。确认新建后会保存完整快照，之后可以安全撤销。</p>
+    <div class="idea-draft-actions"><button class="btn btn-quiet btn-keep-idea" type="button" data-idea-id="${item.id}">只保留在本地</button><button class="btn btn-primary btn-apply-idea" type="button" data-idea-id="${item.id}">确认新建 Wiki 页</button></div>
+  </section>`;
+}
+
+function ideaDetailMarkup(item) {
+  const canDiscuss = item.status === 'open';
+  const turns = (item.turns || []).map(ideaTurnMarkup).join('');
+  return `<section class="idea-thread-card" data-idea-id="${item.id}">
+    <div class="idea-thread-head"><div><p class="eyebrow">独立想法</p><h3>${esc(item.title)}</h3></div><span class="idea-status-chip ${esc(item.status)}">${esc(ideaStatusLabel(item.status))}</span></div>
+    <div class="idea-turns">${turns || '<p class="idea-empty">还没有讨论内容。</p>'}</div>
+    ${canDiscuss ? `<div class="idea-message-compose"><label class="field-label" for="idea-message-input">继续补充或追问<textarea id="idea-message-input" maxlength="10000" placeholder="回应 Agent 的判断，补充例子、前提、反例或新的问题…"></textarea></label><div class="voice-controls idea-voice-controls"><button id="btn-voice-idea-message" class="btn btn-quiet" type="button">开始口述</button><span id="idea-message-voice-status" aria-live="polite">可使用浏览器语音输入，也可继续键入。</span></div><div class="idea-message-actions"><span>每一轮都会保存到这条独立想法中。</span><div><button id="btn-generate-idea-draft" class="btn btn-quiet" type="button" data-idea-id="${item.id}">整理为 Wiki 草稿</button><button id="btn-send-idea-message" class="btn btn-primary" type="button" data-idea-id="${item.id}">继续讨论</button></div></div></div>` : ''}
+    ${ideaDraftMarkup(item)}
+  </section>`;
+}
+
+function renderIdeaCompose() {
+  const detail = document.getElementById('idea-detail');
+  detail.innerHTML = ideaComposeMarkup();
+  const relatedLabel = document.getElementById('idea-related-label');
+  if (relatedLabel && state.selected) {
+    document.getElementById('idea-related-title').textContent = state.selected.title;
+  }
+  setupIdeaVoiceInputs();
+}
+
+async function renderIdeaDetail(ideaId) {
+  const detail = document.getElementById('idea-detail');
+  try {
+    const item = await api(`/api/ideas/${ideaId}`);
+    ideaSelectedId = item.id;
+    detail.innerHTML = ideaDetailMarkup(item);
+    setupIdeaVoiceInputs();
+    document.getElementById('ideas-hint').textContent = item.status === 'open'
+      ? 'Agent 的判断是暂定的。继续补充前提、例子和反例，直到你愿意把讨论压缩成一条知识。'
+      : '这条想法已经形成草稿或完成处理；你仍可以保留本地版本，或撤销已写入的 Wiki 页。';
+    document.querySelectorAll('.idea-list-item').forEach(button => {
+      const active = Number(button.dataset.ideaId) === Number(ideaSelectedId);
+      button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active));
+    });
+    detail.querySelector('.idea-turns')?.lastElementChild?.scrollIntoView({ block: 'nearest' });
+  } catch (e) {
+    detail.innerHTML = `<div class="idea-empty-state"><h3>暂时无法打开这条想法</h3><p>${esc(e.message)}</p></div>`;
+  }
+}
+
+async function loadIdeaList() {
+  const list = document.getElementById('ideas-list');
+  try {
+    const data = await api('/api/ideas?limit=80');
+    const ideas = data.ideas || [];
+    list.innerHTML = ideas.map(ideaListMarkup).join('') || '<p class="ideas-empty">还没有想法。可以先记录一个突然想到的判断。</p>';
+    if (ideaSelectedId && ideas.some(item => Number(item.id) === Number(ideaSelectedId))) {
+      await renderIdeaDetail(ideaSelectedId);
+    } else if (ideas.length) {
+      await renderIdeaDetail(ideas[0].id);
+    } else {
+      ideaSelectedId = null; renderIdeaCompose();
+    }
+  } catch (e) {
+    list.innerHTML = `<p class="ideas-empty">无法读取想法：${esc(e.message)}</p>`;
+    renderIdeaCompose();
+  }
+}
+
+function openIdeas() {
+  document.getElementById('mobile-menu').classList.add('hidden');
+  document.getElementById('btn-mobile-menu').setAttribute('aria-expanded', 'false');
+  document.getElementById('ideas-modal').classList.remove('hidden');
+  document.getElementById('ideas-hint').textContent = '这里不属于复习会话。随时记录一个想法，Agent 会先给出证据边界内的初步判断。';
+  loadIdeaList();
+}
+
+function closeIdeas() { document.getElementById('ideas-modal').classList.add('hidden'); }
+
+async function createIdea() {
+  const button = document.getElementById('btn-create-idea');
+  const input = document.getElementById('idea-input');
+  const content = input?.value.trim() || '';
+  if (content.length < 4) { document.getElementById('idea-compose-status').textContent = '先写下一条具体的想法，再开始讨论。'; input?.focus(); return; }
+  button.disabled = true; button.textContent = 'Agent 正在初评…';
+  try {
+    const related = document.getElementById('idea-related-current')?.checked && state.selected ? state.selected.path : null;
+    const item = await api('/api/ideas', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content, title: document.getElementById('idea-title-input')?.value.trim() || '', persona: recallPersona, related_page_path: related }) });
+    ideaSelectedId = item.id;
+    await loadIdeaList();
+  } catch (e) {
+    document.getElementById('idea-compose-status').textContent = `暂时无法开始讨论：${e.message}`;
+    button.disabled = false; button.textContent = '开始讨论';
+  }
+}
+
+async function sendIdeaMessage(button) {
+  const input = document.getElementById('idea-message-input');
+  const content = input?.value.trim() || '';
+  if (content.length < 2) { input?.focus(); return; }
+  button.disabled = true; button.textContent = 'Agent 思考中…';
+  try {
+    const item = await api(`/api/ideas/${button.dataset.ideaId}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }) });
+    ideaSelectedId = item.id; await loadIdeaList();
+  } catch (e) { document.getElementById('ideas-hint').textContent = `这一轮暂未保存：${e.message}`; button.disabled = false; button.textContent = '继续讨论'; }
+}
+
+async function generateIdeaDraft(button) {
+  button.disabled = true; button.textContent = '正在整理…';
+  try { const item = await api(`/api/ideas/${button.dataset.ideaId}/draft`, { method: 'POST' }); ideaSelectedId = item.id; await loadIdeaList(); }
+  catch (e) { document.getElementById('ideas-hint').textContent = `暂时无法生成草稿：${e.message}`; button.disabled = false; button.textContent = '整理为 Wiki 草稿'; }
+}
+
+async function applyIdea(button, mode) {
+  const detail = button.closest('.idea-thread-card');
+  const id = button.dataset.ideaId;
+  const title = detail.querySelector('#idea-draft-title')?.value.trim() || '';
+  const content = detail.querySelector('#idea-draft-content')?.value.trim() || '';
+  button.disabled = true; button.textContent = mode === 'keep_local' ? '正在保存…' : '正在写入…';
+  try { const item = await api(`/api/ideas/${id}/apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode, title, content }) }); ideaSelectedId = item.id; await loadIdeaList(); if (mode === 'create_idea') loadConcepts(); }
+  catch (e) { document.getElementById('ideas-hint').textContent = `未能处理草稿：${e.message}`; button.disabled = false; button.textContent = mode === 'keep_local' ? '只保留在本地' : '确认新建 Wiki 页'; }
+}
+
+async function undoIdea(button) {
+  button.disabled = true; button.textContent = '正在撤销…';
+  try { const item = await api(`/api/ideas/${button.dataset.ideaId}/undo`, { method: 'POST' }); ideaSelectedId = item.id; await loadIdeaList(); loadConcepts(); }
+  catch (e) { document.getElementById('ideas-hint').textContent = `无法自动撤销：${e.message}`; button.disabled = false; button.textContent = '撤销这次写入'; }
+}
+
 async function saveNotes() {
   if (!state.selected) return;
   const value = document.getElementById('note-input').value;
@@ -679,6 +854,28 @@ function syncRecallPersona() {
   });
 }
 
+function selectedRecallEvidence() {
+  return [...document.querySelectorAll('input[name="recall-evidence-key"]:checked')].map(input => input.value);
+}
+
+function updateRecallEvidenceStatus() {
+  const selected = selectedRecallEvidence();
+  const status = document.getElementById('recall-evidence-status');
+  if (selected.length < 2) {
+    status.textContent = `还需选择 ${2 - selected.length} 项；选择后，要在表达中写出对应内容。`;
+  } else if (selected.length > 3) {
+    status.textContent = '最多选择 3 项，请留出最能代表本次理解的证据。';
+  } else {
+    status.textContent = `已选择 ${selected.length} 项。提交时会检查这些内容是否在表达中出现。`;
+  }
+}
+
+function resetRecallEvidence() {
+  document.querySelectorAll('input[name="recall-evidence-key"]').forEach(input => { input.checked = false; });
+  document.getElementById('recall-uncertainty').value = '';
+  updateRecallEvidenceStatus();
+}
+
 function openRecall(stage = 'intro', sessionId = null) {
   if (!state.selected) return;
   const { path, title } = state.selected;
@@ -688,6 +885,7 @@ function openRecall(stage = 'intro', sessionId = null) {
   document.getElementById('recall-guide').textContent = '正在准备本次回忆引导…';
   document.getElementById('recall-editor-guide').textContent = '从你最确定的一点开始，卡住是正常的；那正是下一步要核对的地方。';
   document.getElementById('recall-input').value = storageGet(recallKey(path));
+  if (stage !== 'simplify') resetRecallEvidence();
   activeSessionId = sessionId;
   recallStartedAt = Date.now();
   if (stage === 'simplify') {
@@ -715,42 +913,99 @@ function nextRecallGuide() {
 }
 
 let speechRecognition = null;
-function setupVoiceRecall() {
-  const button = document.getElementById('btn-voice-recall');
-  const status = document.getElementById('voice-status');
+let activeVoiceRecognition = null;
+
+function setupVoiceInput(button, input, status, copy = {}) {
+  if (!button || !input || !status) return null;
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const startLabel = copy.startLabel || '开始口述';
+  const stopLabel = copy.stopLabel || '停止口述';
+  const doneMessage = copy.doneMessage || '口述已结束，可继续编辑。';
   if (!SpeechRecognition) {
     button.disabled = true;
-    status.textContent = '当前浏览器不提供语音输入，请继续键入表达。';
-    return;
+    status.textContent = '当前浏览器不提供语音输入，请继续键入。';
+    return null;
   }
-  speechRecognition = new SpeechRecognition();
-  speechRecognition.lang = 'zh-CN';
-  speechRecognition.interimResults = true;
-  speechRecognition.continuous = true;
+  const recognition = new SpeechRecognition();
+  recognition.lang = 'zh-CN';
+  recognition.interimResults = true;
+  recognition.continuous = true;
   let committed = '';
-  speechRecognition.onstart = () => {
-    committed = document.getElementById('recall-input').value.trim();
-    button.textContent = '停止口述'; status.textContent = '正在听。停顿后会持续写入表达框。';
+  let recording = false;
+  let failed = false;
+  recognition.onstart = () => {
+    if (activeVoiceRecognition && activeVoiceRecognition !== recognition) activeVoiceRecognition.stop();
+    activeVoiceRecognition = recognition;
+    recording = true;
+    failed = false;
+    committed = input.value.trim();
+    button.textContent = stopLabel;
+    status.textContent = '正在听。停顿后会持续写入输入框。';
   };
-  speechRecognition.onresult = (event) => {
+  recognition.onresult = (event) => {
     let transcript = '';
     for (let index = event.resultIndex; index < event.results.length; index += 1) transcript += event.results[index][0].transcript;
-    document.getElementById('recall-input').value = [committed, transcript].filter(Boolean).join(committed ? ' ' : '');
+    input.value = [committed, transcript].filter(Boolean).join(committed ? ' ' : '');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
   };
-  speechRecognition.onerror = (event) => { status.textContent = `语音输入已停止：${event.error}。可继续键入。`; };
-  speechRecognition.onend = () => { button.textContent = '开始口述'; if (!status.textContent.includes('停止')) status.textContent = '口述已结束，可继续编辑后生成盲区诊断。'; };
+  recognition.onerror = (event) => {
+    failed = true;
+    status.textContent = `语音输入已停止：${event.error}。可继续键入。`;
+  };
+  recognition.onend = () => {
+    recording = false;
+    if (activeVoiceRecognition === recognition) activeVoiceRecognition = null;
+    button.textContent = startLabel;
+    if (!failed) status.textContent = doneMessage;
+  };
   button.addEventListener('click', () => {
-    if (button.textContent === '停止口述') speechRecognition.stop();
-    else speechRecognition.start();
+    if (recording) {
+      recognition.stop();
+      return;
+    }
+    if (activeVoiceRecognition && activeVoiceRecognition !== recognition) activeVoiceRecognition.stop();
+    try { recognition.start(); }
+    catch (_error) { status.textContent = '语音输入暂时无法启动，请检查浏览器麦克风权限。'; }
   });
+  return recognition;
+}
+
+function setupVoiceRecall() {
+  speechRecognition = setupVoiceInput(
+    document.getElementById('btn-voice-recall'),
+    document.getElementById('recall-input'),
+    document.getElementById('voice-status'),
+    { doneMessage: '口述已结束，可继续编辑后生成盲区诊断。' },
+  );
+}
+
+function setupIdeaVoiceInputs() {
+  setupVoiceInput(
+    document.getElementById('btn-voice-idea'),
+    document.getElementById('idea-input'),
+    document.getElementById('idea-voice-status'),
+    { doneMessage: '口述已结束，可继续编辑想法。' },
+  );
+  setupVoiceInput(
+    document.getElementById('btn-voice-idea-message'),
+    document.getElementById('idea-message-input'),
+    document.getElementById('idea-message-voice-status'),
+    { doneMessage: '口述已结束，可继续编辑这一轮讨论。' },
+  );
 }
 
 async function saveRecall() {
   if (!state.selected) return;
   const value = document.getElementById('recall-input').value.trim();
-  if (value.length < 24) {
-    document.getElementById('recall-editor-guide').textContent = '先再多讲一点：至少说明它是什么、为什么重要，或给出一个例子。';
+  const evidenceKeys = selectedRecallEvidence();
+  if (!value) {
+    document.getElementById('recall-editor-guide').textContent = '先从你记得的一点开始表达，再选择要提供的理解证据。';
+    document.getElementById('recall-input').focus();
+    return;
+  }
+  if (evidenceKeys.length < 2 || evidenceKeys.length > 3) {
+    document.getElementById('recall-editor-guide').textContent = '请先选择 2 到 3 项理解证据；它们会替代原先的字数门槛。';
+    updateRecallEvidenceStatus();
     return;
   }
   const button = document.getElementById('btn-save-recall');
@@ -759,7 +1014,11 @@ async function saveRecall() {
   try {
     const result = await api('/api/study/sessions', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ page_path: state.selected.path, explanation: value, persona: recallPersona, elapsed_seconds: Math.round((Date.now() - (recallStartedAt || Date.now())) / 1000) }),
+      body: JSON.stringify({
+        page_path: state.selected.path, explanation: value, persona: recallPersona,
+        evidence_keys: evidenceKeys, uncertainty: document.getElementById('recall-uncertainty').value.trim(),
+        elapsed_seconds: Math.round((Date.now() - (recallStartedAt || Date.now())) / 1000),
+      }),
     });
     activeSessionId = result.session.id;
     const localStructure = result.diagnosis.confidence === 'structure_only';
@@ -768,7 +1027,16 @@ async function saveRecall() {
     document.getElementById('diagnosis-strengths').innerHTML = (result.diagnosis.strengths.length ? result.diagnosis.strengths : ['已完成第一次表达，可以通过第二次表达继续校准。']).map(item => `<li>${esc(item)}</li>`).join('');
     document.getElementById('diagnosis-gaps').innerHTML = (result.gaps.length ? result.gaps : [{ content: '暂未发现结构性缺口，请用更短的话再讲一次验证记忆。', evidence: '' }]).map(gap => `<li>${esc(gap.content)}<small>${esc(gap.evidence || '')}</small></li>`).join('');
     document.getElementById('diagnosis-next-task').textContent = result.diagnosis.next_task;
-    document.getElementById('diagnosis-confidence').textContent = result.diagnosis.confidence === 'reference_checked' ? '反馈已依据当前学习资料核对。' : '当前为表达结构提示：列出的是检测到的句子与可补充项，不判断事实准确性。';
+    const evidenceLabels = (result.diagnosis.understanding_evidence?.checks || [])
+      .filter(item => item.selected).map(item => item.label);
+    const uncertainty = result.diagnosis.uncertainty || document.getElementById('recall-uncertainty').value.trim();
+    document.getElementById('diagnosis-confidence').textContent = [
+      evidenceLabels.length ? `本次可观察证据：${evidenceLabels.join('、')}。` : '',
+      uncertainty ? `你标记的不确定点：${uncertainty}。诊断已优先围绕它给出下一步。` : '',
+      result.diagnosis.confidence === 'reference_checked'
+        ? '反馈已依据当前学习资料核对。'
+        : '当前为表达结构提示：列出的是检测到的句子与可补充项，不判断事实准确性。',
+    ].filter(Boolean).join(' ');
     const feedback = document.getElementById('diagnosis-feedback');
     feedback.classList.toggle('hidden', !localStructure);
     feedback.dataset.sessionId = String(activeSessionId || '');
@@ -801,7 +1069,7 @@ async function saveSimplify() {
   if (!activeSessionId) return;
   const input = document.getElementById('simplify-input');
   const explanation = input.value.trim();
-  if (explanation.length < 24) { input.focus(); return; }
+  if (!explanation) { input.focus(); return; }
   const button = document.getElementById('btn-save-simplify');
   button.disabled = true; button.textContent = '正在生成学习结果…';
   try {
@@ -1162,6 +1430,30 @@ function gapStatusText(status) {
   return { open: '待补充', revised: '已补充，待核对', verified: '已澄清' }[status] || status;
 }
 
+function gapPathMarkup(gap) {
+  const path = gap.learning_path || {};
+  const stage = path.stage || 'practice_ready';
+  const type = path.label || '待澄清点';
+  const completed = gap.status === 'verified';
+  let action = '';
+  if (!completed && stage === 'practice_ready') {
+    action = `<label class="gap-exercise-label">第 1 步 · 2 分钟微练习<textarea class="gap-revision-input" maxlength="10000" placeholder="${esc(path.practice_prompt || '用自己的话补全这个问题。')}">${esc(gap.revision || '')}</textarea></label><div class="gap-actions"><span class="gap-feedback"></span><button class="btn btn-primary btn-save-gap" type="button">完成微练习</button></div>`;
+  } else if (!completed && stage === 'retest_ready') {
+    action = `<label class="gap-exercise-label">第 2 步 · 换情境复测<textarea class="gap-retest-input" maxlength="10000" placeholder="${esc(path.retest_prompt || '换一个新情境，再说明你的判断。')}"></textarea></label><div class="gap-actions"><span class="gap-feedback"></span><button class="btn btn-primary btn-retest-gap" type="button">提交复测并核对</button></div>`;
+  } else if (!completed && stage === 'retest_wait') {
+    action = `<p class="gap-schedule">第 2 步将在 ${esc(path.retest_due || '明天')} 开放：${esc(path.retest_prompt || '')}</p>`;
+  } else if (!completed && stage === 'retest_recorded') {
+    action = `<p class="gap-revision"><b>异情境复测：</b>${historyEscape(gap.retest_answer || '')}</p><p class="gap-schedule">复测已保存，仍待依据原文或学习助手核对；不会把它直接当成正确答案。</p>`;
+  }
+  return `<article class="gap-item" data-gap-id="${gap.id}">
+    <div class="history-item-head"><span>${esc(gap.page_title)}</span><small class="gap-status ${esc(gap.status)}">${gapStatusText(gap.status)}</small></div>
+    <p class="gap-type"><b>${esc(type)}</b> · ${esc(path.goal || '')}</p>
+    <p class="gap-original">${historyEscape(gap.content)}</p>
+    ${gap.revision ? `<p class="gap-revision"><b>第 1 步记录：</b>${historyEscape(gap.revision)}</p>` : ''}
+    <p class="gap-next-action">${esc(path.next_action || '')}</p>${action}
+  </article>`;
+}
+
 function historyEscape(value) {
   return esc(value || '').replace(/\n/g, '<br>');
 }
@@ -1199,14 +1491,8 @@ async function openHistory(view = 'gaps') {
       return;
     }
     const data = await api('/api/study/gaps?limit=50');
-    hint.textContent = data.gaps.length ? '补充你的理解后，系统会保存修订；已配置学习助手时会进一步依据资料核对。' : '目前没有待处理盲区。完成一次回顾后，识别出的盲区会在这里出现。';
-    content.innerHTML = data.gaps.map(gap => `
-      <article class="gap-item" data-gap-id="${gap.id}">
-        <div class="history-item-head"><span>${esc(gap.page_title)}</span><small class="gap-status ${esc(gap.status)}">${gapStatusText(gap.status)}</small></div>
-        <p class="gap-original">${historyEscape(gap.content)}</p>
-        ${gap.revision ? `<p class="gap-revision"><b>你的补充：</b>${historyEscape(gap.revision)}</p>` : ''}
-        ${gap.status === 'verified' ? '' : `<textarea class="gap-revision-input" maxlength="10000" placeholder="用自己的话补全这个问题：说明机制、原因或举一个例子。">${esc(gap.revision || '')}</textarea><div class="gap-actions"><span class="gap-feedback"></span><button class="btn btn-primary btn-save-gap" type="button">保存补充并核对</button></div>`}
-      </article>`).join('') || '<p class="review-empty">暂无待处理盲区。</p>';
+    hint.textContent = data.gaps.length ? '每个盲区都会走“2 分钟微练习 → 隔天换情境复测 → 来源核对”的小型纠错路径；第一次补充不会被当成答案。' : '目前没有待处理盲区。完成一次回顾后，识别出的盲区会在这里出现。';
+    content.innerHTML = data.gaps.map(gapPathMarkup).join('') || '<p class="review-empty">暂无待处理盲区。</p>';
   } catch (e) {
     hint.textContent = `暂时无法读取学习记录：${e.message}`;
   }
@@ -1227,20 +1513,34 @@ async function saveGapRevision(item) {
     const gap = await api(`/api/study/gaps/${item.dataset.gapId}/revision`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ revision }),
     });
-    feedback.textContent = gap.feedback;
-    item.querySelector('.gap-status').textContent = gapStatusText(gap.status);
-    item.querySelector('.gap-status').className = `gap-status ${gap.status}`;
-    if (gap.status === 'verified') {
-      item.querySelector('.gap-actions').remove();
-      input.remove();
-    } else {
-      button.textContent = '再次保存补充';
-      button.disabled = false;
-    }
+    item.outerHTML = gapPathMarkup(gap);
   } catch (e) {
     feedback.textContent = `未能保存：${e.message}`;
     button.disabled = false;
-    button.textContent = '保存补充并核对';
+    button.textContent = '完成微练习';
+  }
+}
+
+async function saveGapRetest(item) {
+  const input = item.querySelector('.gap-retest-input');
+  const button = item.querySelector('.btn-retest-gap');
+  const feedback = item.querySelector('.gap-feedback');
+  const revision = input.value.trim();
+  if (revision.length < 24) {
+    feedback.textContent = '请至少写 24 个字符，说明新情境下如何判断。';
+    return;
+  }
+  button.disabled = true;
+  button.textContent = '正在依据资料核对…';
+  try {
+    const gap = await api(`/api/study/gaps/${item.dataset.gapId}/retest`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ revision }),
+    });
+    item.outerHTML = gapPathMarkup(gap);
+  } catch (e) {
+    feedback.textContent = `未能提交复测：${e.message}`;
+    button.disabled = false;
+    button.textContent = '提交复测并核对';
   }
 }
 
@@ -1337,6 +1637,12 @@ function syncPageActions() {
     btn.classList.toggle('active', !btn.classList.contains('act-clear') && (meta[field] || '') === value);
     btn.setAttribute('aria-pressed', String(!btn.classList.contains('act-clear') && (meta[field] || '') === value));
   });
+  const confidence = meta.mastery?.self_confidence || null;
+  document.querySelectorAll('.confidence-btn').forEach(btn => {
+    const active = Number(btn.dataset.confidence) === confidence;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', String(active));
+  });
 }
 
 async function onActClick(btn) {
@@ -1357,7 +1663,7 @@ async function onActClick(btn) {
     if (field === 'status') {
       state.selected.status = state.currentMeta[field];
       state.selected.mastery = field === 'status' && value !== 'unread'
-        ? { level: 'read', label: '已阅读' } : state.selected.mastery;
+        ? { ...(state.selected.mastery || {}), level: 'read', label: '已阅读' } : state.selected.mastery;
       renderPageMeta();
     }
     renderTree();
@@ -1365,6 +1671,24 @@ async function onActClick(btn) {
   } catch (err) {
     console.error(err);
   }
+}
+
+async function saveConceptConfidence(btn) {
+  if (!state.selected || !state.currentMeta) return;
+  const confidence = Number(btn.dataset.confidence);
+  btn.disabled = true;
+  try {
+    const result = await api('/api/study/confidence', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ page_path: state.selected.path, confidence }),
+    });
+    state.currentMeta.mastery = { ...(state.currentMeta.mastery || {}), self_confidence: result.confidence };
+    const concept = state.concepts.find(item => item.path === state.selected.path);
+    if (concept) concept.mastery = { ...(concept.mastery || {}), self_confidence: result.confidence };
+    syncPageActions();
+  } catch (e) {
+    window.alert(`未能保存当前把握度：${e.message}`);
+  } finally { btn.disabled = false; }
 }
 
 /* ===== 知识图谱 ===== */
@@ -1379,7 +1703,7 @@ const IMP_R = { high: 13, medium: 10, low: 7 };
 const STATUS_FILL = { unread: '#f3eee4', reading: '#d59a35', read: '#73855d' };
 const IMPORTANCE_FILL = { high: '#c65734', medium: '#d59a35', low: '#8c9d79' };
 const SECTION_FILL = ['#73855d', '#c65734', '#5978bb', '#ad6c9e', '#bd8a3d', '#557f78'];
-const MASTERY_RING = { unseen: '#a29f99', read: '#bd8a3d', recalled: '#5978bb', revised: '#5978bb', stable: '#516e49' };
+const MASTERY_RING = { unseen: '#a29f99', read: '#bd8a3d', recalled: '#5978bb', checked: '#5b7d65', maintaining: '#365e49' };
 const GRAPH_DEFAULTS = {
   sections: [], notesOnly: false, showIsolated: true,
   scope: 'neighbors',
@@ -1497,7 +1821,7 @@ function updateGraphScopeSummary() {
 }
 
 function masteryRank(node) {
-  return { unseen: 0, read: 1, recalled: 2, revised: 3, stable: 4 }[node.mastery?.level] ?? 0;
+  return { unseen: 0, read: 1, recalled: 2, checked: 3, maintaining: 4 }[node.mastery?.level] ?? 0;
 }
 
 function graphReason(node) {
@@ -1507,9 +1831,9 @@ function graphReason(node) {
   return {
     unseen: '尚未留下学习证据，适合从阅读与第一次回忆开始。',
     read: '已经阅读过，趁记忆仍在尝试一次回忆表达。',
-    recalled: '已完成第一次回忆，下一步是补充并简化复述。',
-    revised: '已完成修订，按计划复习可巩固记忆。',
-    stable: '掌握较稳定，可作为关联概念的支点。',
+    recalled: '已完成第一次回忆，尚未依据原文或明确要点核对。',
+    checked: '至少一次回答已依据 Wiki 原文或必备要点核对。',
+    maintaining: '已在较长间隔中多次通过来源核对，仍应继续复习。',
   }[node.mastery?.level] || '从这个概念开始建立学习证据。';
 }
 
@@ -1771,7 +2095,7 @@ function renderGraph() {
     masteryRing.setAttribute('fill', 'none');
     masteryRing.setAttribute('stroke', MASTERY_RING[node.mastery?.level] || MASTERY_RING.unseen);
     masteryRing.setAttribute('stroke-width', '1.5');
-    masteryRing.setAttribute('stroke-dasharray', node.mastery?.level === 'stable' ? '0' : '3 2');
+    masteryRing.setAttribute('stroke-dasharray', node.mastery?.level === 'maintaining' ? '0' : '3 2');
     group.appendChild(masteryRing);
     const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
     circle.setAttribute('r', radius);
@@ -2067,15 +2391,26 @@ function renderReviewCards(cards) {
       <div class="review-item-head"><small>${esc(card.page_title)} · ${card.overdue_days ? `已逾期 ${card.overdue_days} 天` : `下次 ${esc(card.due)}`}</small><span class="review-stage">${esc(card.stage)}</span></div>
       <h3>${esc(card.question)}</h3>
       <p class="review-why">为什么现在出现：${esc(card.why_today || '按复习计划安排')}，约 ${card.estimated_minutes || 1} 分钟。</p>
-      <p class="review-prompt">不要先看答案。写下你能重建出的机制、条件或例子。</p>
+      <p class="review-prompt">不要先看资料摘录。写下你能重建出的机制、条件或例子。</p>
       <textarea class="review-answer-input" maxlength="5000" placeholder="先凭记忆作答，再请教练检查…"></textarea>
       <div class="review-coaches" aria-label="选择检查教练">
         <button class="btn btn-quiet review-coach-btn active" data-agent="feynman" type="button">费曼教练 · 帮我梳理</button>
         <button class="btn btn-quiet review-coach-btn" data-agent="strict" type="button">突击教练 · 直接检查</button>
       </div>
       <div class="review-feedback hidden"></div>
-      <p class="review-answer hidden">${escapeMultiline(card.answer)}</p>
-      <button class="text-btn review-show-answer" type="button">查看参考答案</button>
+      ${card.can_show_reference ? `
+        <section class="review-reference hidden">
+          <p><b>${esc(card.reference_label || 'Wiki 原文')}</b><br>${escapeMultiline(card.reference_excerpt)}</p>
+          <h4>核对时必须覆盖的要点</h4>
+          <ul>${(card.required_points || []).map(point => `<li>${esc(point)}</li>`).join('')}</ul>
+          <button class="text-btn review-open-source" type="button" data-source-path="${esc(card.page_path)}">回原文定位</button>
+        </section>
+        <button class="text-btn review-show-answer" type="button">查看 Wiki 参考与必备要点</button>` : `
+        <section class="review-reference review-reference-pending hidden">
+          <p><b>${esc(card.reference_label || '资料待核对')}</b><br>这张旧卡没有保存可验证的 Wiki 摘录。请回到原文重新核对；本次不会计入“已核对”或“保持中”。</p>
+          <button class="text-btn review-open-source" type="button" data-source-path="${esc(card.page_path)}">回原文定位</button>
+        </section>
+        <button class="text-btn review-show-answer" type="button">查看原文核对说明</button>`}
       <div class="review-rating hidden">
         <button class="btn btn-quiet" data-rating="again">没记住</button>
         <button class="btn btn-quiet" data-rating="hard">很吃力</button>
@@ -2116,6 +2451,13 @@ async function openReviewPlan(mode = reviewMode) {
 document.getElementById('review-card-stack').addEventListener('click', async (e) => {
   const item = e.target.closest('.review-item');
   if (!item) return;
+  const sourceButton = e.target.closest('.review-open-source');
+  if (sourceButton?.dataset.sourcePath) {
+    document.getElementById('review-modal').classList.add('hidden');
+    await selectConcept(sourceButton.dataset.sourcePath);
+    document.getElementById('page-body').scrollIntoView({ block: 'start', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+    return;
+  }
   const coach = e.target.closest('.review-coach-btn');
   if (coach) {
     item.querySelectorAll('.review-coach-btn').forEach(button => button.classList.toggle('active', button === coach));
@@ -2133,7 +2475,12 @@ document.getElementById('review-card-stack').addEventListener('click', async (e)
       const box = item.querySelector('.review-feedback');
       box.classList.remove('hidden');
       box.classList.toggle('strict', feedback.agent === 'strict');
-      box.innerHTML = `<b>${esc(feedback.agent_name)} · ${feedback.verdict === 'pass' ? '通过' : '需要补强'}</b><p>${esc(feedback.feedback)}</p><p>下一问：${esc(feedback.follow_up)}</p>`;
+      const evidenceCopy = {
+        source_standard: '本次回答已对上 Wiki 必备要点，计为一次来源核对。',
+        source_reviewed: '本次回答已由学习助手依据 Wiki 资料核对，计为一次来源核对。',
+        unverified: '本次不计入“已核对”或“保持中”；请用当前资料继续核对。',
+      }[feedback.evidence_level] || '本次核对状态暂未确定。';
+      box.innerHTML = `<b>${esc(feedback.agent_name)} · ${feedback.verdict === 'pass' ? '通过' : '需要补强'}</b><p>${esc(feedback.feedback)}</p><p>${esc(evidenceCopy)}</p><p>下一问：${esc(feedback.follow_up)}</p>`;
     } catch (err) {
       item.querySelector('.review-feedback').innerHTML = `<p>${esc(err.message)}</p>`;
       item.querySelector('.review-feedback').classList.remove('hidden');
@@ -2144,7 +2491,7 @@ document.getElementById('review-card-stack').addEventListener('click', async (e)
     return;
   }
   if (e.target.classList.contains('review-show-answer')) {
-    item.querySelector('.review-answer').classList.remove('hidden');
+    item.querySelector('.review-reference').classList.remove('hidden');
     item.querySelector('.review-rating').classList.remove('hidden');
     e.target.classList.add('hidden');
     return;
@@ -2173,14 +2520,18 @@ async function showWeeklyReport() {
   try {
     const report = await api('/api/study/weekly-report');
     const s = report.summary;
+    const diagnostic = report.diagnostic || {};
     hint.textContent = report.has_evidence
       ? `${report.range.start} 至 ${report.range.end}。重点记录被修正的理解和仍需复查的盲区。`
       : `${report.range.start} 至 ${report.range.end} 还没有足够学习证据；完成一次二次表达或复习后再生成总结。`;
     content.innerHTML = `
-      <section class="weekly-report">${report.has_evidence ? `<div class="weekly-summary"><span>完成二次表达 <b>${s.completed_sessions}</b></span><span>补充盲区 <b>${s.revised_gaps}</b></span><span>间隔复习 <b>${s.reviews}</b></span><span>稳定掌握 <b>${s.stable_concepts}</b></span></div>` : '<p class="report-empty">没有把“0”包装成成绩。完成一次回忆表达、二次复述或间隔复习后，这里才会展示基于证据的趋势。</p>'}
-      <h3>需要继续核对的理解</h3>${report.corrected_misconceptions.map(item => `<article class="history-item"><div class="history-item-head"><span>${esc(item.title)}</span><small>${item.times > 1 ? `重复 ${item.times} 次` : '待后续验证'}</small></div><p>${esc(item.gap)}</p></article>`).join('') || '<p class="review-empty">本周没有记录到待澄清点。</p>'}
-      <h3>稳定掌握</h3>${report.stable_concepts.map(item => `<button class="recent-note report-concept" type="button" data-path="${esc(item.path)}"><span>${esc(item.title)}</span><small>稳定掌握</small></button>`).join('') || '<p class="review-empty">继续完成间隔复习后，这里会出现稳定掌握的概念。</p>'}</section>`;
-    content.querySelectorAll('.report-concept').forEach(button => button.addEventListener('click', () => {
+      <section class="weekly-report">${report.has_evidence ? `<div class="weekly-summary"><span>完成二次表达 <b>${s.completed_sessions}</b></span><span>补充盲区 <b>${s.revised_gaps}</b></span><span>间隔复习 <b>${s.reviews}</b></span><span>保持中 <b>${s.maintaining_concepts}</b></span></div>` : '<p class="report-empty">没有把“0”包装成成绩。完成一次回忆表达、二次复述或间隔复习后，这里才会展示基于证据的趋势。</p>'}
+      <h3>反复错的概念簇</h3>${(diagnostic.recurring_error_clusters || []).map(item => `<button class="history-item weekly-path-item" type="button" data-path="${esc(item.path)}"><div class="history-item-head"><span>${esc(item.title)}</span><small>${esc(item.label)} · ${item.times} 次</small></div><p>${esc(item.next_action)}</p></button>`).join('') || '<p class="review-empty">本周没有重复出现的错误类型。</p>'}
+      <h3>从不会到会的证据</h3>${(diagnostic.progress_evidence || []).map(item => `<button class="history-item weekly-path-item" type="button" data-path="${esc(item.path)}"><div class="history-item-head"><span>${esc(item.title)}</span><small>${esc(item.level)}</small></div><p>${esc(item.evidence)}</p></button>`).join('') || '<p class="review-empty">只有出现“待澄清 → 来源核对”的记录后，这里才会展示变化；不会用活动次数替代掌握证据。</p>'}
+      <h3>下周优先解决 1–3 件事</h3>${(diagnostic.next_week_priorities || []).map((item, index) => `<button class="history-item weekly-priority weekly-path-item" type="button" data-path="${esc(item.path)}"><div class="history-item-head"><span>${index + 1}. ${esc(item.title)}</span><small>约 ${item.estimated_minutes} 分钟</small></div><p><b>为什么：</b>${esc(item.why)}</p><p><b>完成后：</b>${esc(item.benefit)}</p></button>`).join('') || '<p class="review-empty">连接资料后，这里会给出下周最少且可执行的优先项。</p>'}
+      <h3>仍需继续核对的理解</h3>${report.corrected_misconceptions.map(item => `<article class="history-item"><div class="history-item-head"><span>${esc(item.title)}</span><small>${item.times > 1 ? `重复 ${item.times} 次` : '待后续验证'}</small></div><p>${esc(item.gap)}</p></article>`).join('') || '<p class="review-empty">本周没有记录到待澄清点。</p>'}
+      <h3>保持中</h3>${report.maintaining_concepts.map(item => `<button class="recent-note report-concept" type="button" data-path="${esc(item.path)}"><span>${esc(item.title)}</span><small>已通过多次来源核对</small></button>`).join('') || '<p class="review-empty">完成多次来源核对并拉开间隔后，这里会出现保持中的概念。</p>'}</section>`;
+    content.querySelectorAll('.report-concept, .weekly-path-item').forEach(button => button.addEventListener('click', () => {
       document.getElementById('history-modal').classList.add('hidden'); selectConcept(button.dataset.path);
     }));
   } catch (e) { hint.textContent = `无法生成本周学习报告：${e.message}`; }
@@ -2388,11 +2739,26 @@ async function openWorkspace() {
   document.querySelector(`input[name="diagnostic-mode"][value="${workspace.diagnostic_mode}"]`).checked = true;
   document.getElementById('daily-review-goal').value = workspace.daily_review_goal;
   document.querySelector(`input[name="learning-goal"][value="${workspace.learning_goal || 'long_term'}"]`).checked = true;
+  document.getElementById('exam-date').value = workspace.exam_date || '';
+  document.getElementById('available-minutes').value = workspace.available_minutes || 25;
+  renderSectionWeights(workspace.section_weights || {});
   document.getElementById('workspace-status').textContent = workspace.uses_environment_path
     ? '当前 Wiki 由启动环境指定，保存的路径会在下次未指定环境变量时生效。'
     : (workspace.configured ? '当前资料已连接。' : '尚未连接有效 Wiki，可先使用示例体验。');
   syncWorkspaceFields();
   await loadLlmSettings();
+}
+
+function renderSectionWeights(weights = {}) {
+  const list = document.getElementById('section-weight-list');
+  const sections = [...new Set(state.concepts.map(concept => concept.section).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+  list.innerHTML = sections.length
+    ? sections.map(section => `<label class="section-weight-row"><span>${esc(section)}</span><select data-section-weight="${esc(section)}" aria-label="${esc(section)} 章节权重">${[1, 2, 3, 4, 5].map(weight => `<option value="${weight}" ${Number(weights[section] || 3) === weight ? 'selected' : ''}>${weight}</option>`).join('')}</select></label>`).join('')
+    : '<p class="workspace-context-empty">连接资料后，可为每个顶层章节设置权重。</p>';
+}
+
+function selectedSectionWeights() {
+  return Object.fromEntries([...document.querySelectorAll('[data-section-weight]')].map(input => [input.dataset.sectionWeight, Number(input.value)]));
 }
 
 function selectedWorkspaceMode() { return document.querySelector('input[name="workspace-mode"]:checked').value; }
@@ -2444,6 +2810,9 @@ async function saveWorkspace() {
         diagnostic_mode: document.querySelector('input[name="diagnostic-mode"]:checked').value,
         daily_review_goal: Number(document.getElementById('daily-review-goal').value),
         learning_goal: document.querySelector('input[name="learning-goal"]:checked').value,
+        exam_date: document.getElementById('exam-date').value,
+        available_minutes: Number(document.getElementById('available-minutes').value),
+        section_weights: selectedSectionWeights(),
       }),
     });
     state.workspace = saved; status.textContent = '已保存。正在重新加载学习资料…';
@@ -2468,6 +2837,9 @@ document.querySelectorAll('[data-library-status]').forEach(button => {
 document.querySelectorAll('.act-btn').forEach(btn => {
   btn.addEventListener('click', () => onActClick(btn));
 });
+document.querySelectorAll('.confidence-btn').forEach(btn => {
+  btn.addEventListener('click', () => saveConceptConfidence(btn));
+});
 document.getElementById('btn-graph').addEventListener('click', toggleGraph);
 document.getElementById('btn-mobile-concept-drawer').addEventListener('click', () => {
   const panel = document.getElementById('concept-panel');
@@ -2483,10 +2855,29 @@ document.getElementById('btn-analyze-note').addEventListener('click', analyzeCur
 document.getElementById('notes-modal').addEventListener('click', (e) => {
   if (e.target.id === 'notes-modal') closeNotes();
 });
+document.getElementById('btn-ideas').addEventListener('click', openIdeas);
+document.getElementById('btn-mobile-ideas').addEventListener('click', openIdeas);
+document.getElementById('btn-close-ideas').addEventListener('click', closeIdeas);
+document.getElementById('ideas-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'ideas-modal') closeIdeas();
+  const ideaButton = e.target.closest('.idea-list-item');
+  if (ideaButton) { ideaSelectedId = Number(ideaButton.dataset.ideaId); renderIdeaDetail(ideaSelectedId); }
+  if (e.target.closest('#btn-new-idea')) { ideaSelectedId = null; document.getElementById('ideas-hint').textContent = '写下一个独立想法。它不需要先关联知识点，也不会自动写入 Wiki。'; renderIdeaCompose(); }
+  if (e.target.closest('#btn-create-idea')) createIdea();
+  if (e.target.closest('#btn-send-idea-message')) sendIdeaMessage(e.target.closest('#btn-send-idea-message'));
+  if (e.target.closest('#btn-generate-idea-draft')) generateIdeaDraft(e.target.closest('#btn-generate-idea-draft'));
+  if (e.target.closest('.btn-apply-idea')) applyIdea(e.target.closest('.btn-apply-idea'), 'create_idea');
+  if (e.target.closest('.btn-keep-idea')) applyIdea(e.target.closest('.btn-keep-idea'), 'keep_local');
+  if (e.target.closest('.btn-undo-idea')) undoIdea(e.target.closest('.btn-undo-idea'));
+});
 document.getElementById('btn-close-recall').addEventListener('click', closeRecall);
 document.getElementById('btn-recall-ready').addEventListener('click', beginRecall);
 document.getElementById('btn-recall-hint').addEventListener('click', nextRecallGuide);
 document.getElementById('btn-save-recall').addEventListener('click', saveRecall);
+document.querySelectorAll('input[name="recall-evidence-key"]').forEach(input => input.addEventListener('change', () => {
+  if (selectedRecallEvidence().length > 3) input.checked = false;
+  updateRecallEvidenceStatus();
+}));
 document.querySelectorAll('input[name="recall-persona"]').forEach(input => input.addEventListener('change', () => {
   recallPersona = input.value;
   storageSet('feynman-recall-persona', recallPersona);
@@ -2550,6 +2941,8 @@ ensureKnowledgeTab();
 document.getElementById('history-content').addEventListener('click', (e) => {
   const button = e.target.closest('.btn-save-gap');
   if (button) saveGapRevision(button.closest('.gap-item'));
+  const retestButton = e.target.closest('.btn-retest-gap');
+  if (retestButton) saveGapRetest(retestButton.closest('.gap-item'));
   const relinkButton = e.target.closest('.btn-relink-page');
   if (relinkButton) relinkPage(relinkButton.closest('.orphan-item'));
   if (e.target.closest('#btn-save-reflection')) saveReflection();

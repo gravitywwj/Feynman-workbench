@@ -1,6 +1,7 @@
 """学习闭环 API 测试：讲解会话、笔记和复习卡。"""
 from fastapi.testclient import TestClient
 
+from app import db
 from app.main import app
 
 client = TestClient(app)
@@ -22,6 +23,86 @@ def test_create_session_persists_explanation_gaps_and_cards(wiki):
     detail = client.get(f"/api/study/sessions/{data['session']['id']}")
     assert detail.status_code == 200
     assert detail.json()["session"]["id"] == data["session"]["id"]
+
+
+def test_recall_requires_selected_observable_evidence_and_records_uncertainty(wiki):
+    missing_signal = client.post("/api/study/sessions", json={
+        "page_path": PAGE,
+        "evidence_keys": ["definition", "boundary"],
+        "explanation": "查询改写是让检索问题更清楚的处理方式。",
+    })
+    assert missing_signal.status_code == 400
+    assert "适用边界或条件" in missing_signal.json()["detail"]
+
+    created = client.post("/api/study/sessions", json={
+        "page_path": PAGE,
+        "evidence_keys": ["definition", "mechanism", "boundary"],
+        "uncertainty": "我不确定约束条件是否总要补充。",
+        "explanation": (
+            "查询改写是把检索问题改得更清楚的处理方式。"
+            "因为原问题条件不足，所以先补上对象和约束，再让检索系统查找资料。"
+            "但在信息已经完整的场景里，额外改写可能并不适用。"
+        ),
+    })
+    assert created.status_code == 200
+    data = created.json()
+    assert data["session"]["evidence_keys"] == ["definition", "mechanism", "boundary"]
+    assert data["session"]["uncertainty"] == "我不确定约束条件是否总要补充。"
+    assert data["diagnosis"]["uncertainty"] == "我不确定约束条件是否总要补充。"
+    assert any(item["selected"] and item["passed"] for item in data["diagnosis"]["understanding_evidence"]["checks"])
+
+
+def test_review_cards_keep_wiki_source_instead_of_first_expression(wiki):
+    false_first_expression = "我的首次表达声称月球芝士是查询改写的唯一标准。"
+    created = client.post("/api/study/sessions", json={
+        "page_path": PAGE,
+        "explanation": false_first_expression,
+    })
+    assert created.status_code == 200
+    card = created.json()["cards"][0]
+    assert card["reference_status"] == "source"
+    assert card["can_show_reference"] is True
+    assert card["required_points"]
+    assert "月球芝士" not in card["answer"]
+    assert "月球芝士" not in card["reference_excerpt"]
+    assert card["source_anchor"] == "Query Rewriting"
+
+
+def test_mastery_requires_source_checks_not_only_ratings(wiki):
+    created = client.post("/api/study/sessions", json={
+        "page_path": PAGE,
+        "explanation": "查询改写是 RAG 的关键环节，因为它会把问题整理为更易检索的形式。例如可以补充对象和目标。",
+    }).json()
+    card = created["cards"][0]
+    card_id = card["id"]
+
+    concepts = client.get("/api/concepts").json()["concepts"]
+    concept = next(item for item in concepts if item["path"] == PAGE)
+    assert concept["mastery"]["level"] == "recalled"
+
+    # Scheduling and self-rating change intervals, but cannot independently prove factual recall.
+    assert client.post(f"/api/study/reviews/{card_id}", json={"rating": "good"}).status_code == 200
+    assert client.post(f"/api/study/reviews/{card_id}", json={"rating": "easy"}).status_code == 200
+    concepts = client.get("/api/concepts").json()["concepts"]
+    concept = next(item for item in concepts if item["path"] == PAGE)
+    assert concept["mastery"]["level"] == "recalled"
+
+    answer = "。".join(card["required_points"]) + "。我会回到原文继续核对每一个要点。"
+    first_check = client.post(f"/api/study/reviews/{card_id}/attempt", json={"agent": "strict", "answer": answer})
+    assert first_check.status_code == 200
+    assert first_check.json()["evidence_level"] == "source_standard"
+    concepts = client.get("/api/concepts").json()["concepts"]
+    concept = next(item for item in concepts if item["path"] == PAGE)
+    assert concept["mastery"]["level"] == "checked"
+
+    # A second click on the same day must not be mistaken for spaced retention.
+    with db.cursor() as cur:
+        cur.execute("UPDATE review_attempts SET created_at = datetime('now', '-14 days') WHERE id = ?", (first_check.json()["id"],))
+    second_check = client.post(f"/api/study/reviews/{card_id}/attempt", json={"agent": "feynman", "answer": answer})
+    assert second_check.status_code == 200
+    concepts = client.get("/api/concepts").json()["concepts"]
+    concept = next(item for item in concepts if item["path"] == PAGE)
+    assert concept["mastery"]["level"] == "maintaining"
 
 
 def test_session_can_be_simplified_into_learning_outcome(wiki):
@@ -91,8 +172,10 @@ def test_home_action_prioritizes_a_startable_concept(wiki):
     data = response.json()
     assert data["type"] == "start"
     assert data["page_path"].endswith(".md")
-    assert data["reason"] == "mastery_state"
-    assert "尚未留下" in data["detail"] or "已读完" in data["detail"]
+    assert data["reason"] == "contextual_evidence"
+    assert "为什么是它" in data["detail"]
+    assert data["estimated_minutes"] >= 1
+    assert data["benefit"]
     assert data["alternatives"]
 
 
@@ -235,9 +318,13 @@ def test_review_summary_report_and_export_import_are_additive(wiki):
     assert imported.json()["imported"]["sessions"] == 0
 
 
-def test_short_explanation_rejected(wiki):
-    response = client.post("/api/study/sessions", json={"page_path": PAGE, "explanation": "太短"})
-    assert response.status_code == 400
+def test_short_but_evidenced_explanation_is_not_rejected_by_a_numeric_gate(wiki):
+    response = client.post("/api/study/sessions", json={
+        "page_path": PAGE,
+        "evidence_keys": ["definition", "mechanism"],
+        "explanation": "它是检索工具，因为补条件所以更好找。",
+    })
+    assert response.status_code == 200
 
 
 def test_note_round_trip(wiki):
@@ -330,7 +417,7 @@ def test_reflections_are_timestamped_exported_and_can_be_summarized(wiki):
     assert summary.json()["summary_source"] in {"local", "llm"}
 
     exported = client.get("/api/study/export").json()
-    assert exported["version"] == 3
+    assert exported["version"] == 5
     assert len(exported["reflections"]) == 2
     assert exported["reflections"][0]["session_id"] == created["session"]["id"]
     preview = client.post("/api/study/import/preview", json={"payload": exported})
@@ -393,6 +480,72 @@ def test_history_and_gap_revision_are_persisted(wiki):
     assert revised.json()["status"] == "revised"
     assert revised.json()["revision"].startswith("我会先列出")
     assert client.get("/api/study/gaps", params={"status": "revised"}).json()["gaps"]
+
+
+def test_gap_repair_uses_micro_practice_then_next_day_new_context_retest(wiki):
+    created = client.post("/api/study/sessions", json={
+        "page_path": PAGE,
+        "explanation": "查询改写能让检索更准确，但我还不能说明它怎样工作。",
+    }).json()
+    gap = next(item for item in created["gaps"] if item["status"] == "open")
+    assert gap["gap_type"] in {"concept_missing", "causal_error", "boundary_missing", "transfer_failure"}
+    assert gap["learning_path"]["stage"] == "practice_ready"
+    assert gap["learning_path"]["practice_minutes"] == 2
+
+    practice = client.post(f"/api/study/gaps/{gap['id']}/revision", json={
+        "revision": "我会先确认问题中的对象、场景和限制，再把缺失信息补进查询，之后才交给检索系统寻找更贴近任务的资料。",
+    })
+    assert practice.status_code == 200
+    assert practice.json()["status"] == "revised"
+    assert practice.json()["learning_path"]["stage"] == "retest_wait"
+    assert client.post(f"/api/study/gaps/{gap['id']}/retest", json={
+        "revision": "在新的客服检索场景里，我会先补出用户、产品和时限，再判断这些条件如何让检索结果更贴近当前问题。",
+    }).status_code == 400
+
+    with db.cursor() as cur:
+        cur.execute("UPDATE gaps SET retest_due = date('now', 'localtime', '-1 day') WHERE id = ?", (gap["id"],))
+    retest = client.post(f"/api/study/gaps/{gap['id']}/retest", json={
+        "revision": "在新的客服检索场景里，我会先补出用户、产品和时限，再判断这些条件如何让检索结果更贴近当前问题。",
+    })
+    assert retest.status_code == 200
+    assert retest.json()["learning_path"]["stage"] in {"retest_recorded", "verified"}
+    assert retest.json()["retest_answer"].startswith("在新的客服")
+
+
+def test_contextual_recommendation_uses_study_settings_and_self_confidence(wiki):
+    settings = client.put("/api/study/workspace", json={
+        "mode": "local", "wiki_path": str(wiki), "diagnostic_mode": "local", "daily_review_goal": 5,
+        "learning_goal": "exam", "exam_date": "2099-01-01", "available_minutes": 18,
+        "section_weights": {"Financing": 5, "AI": 1},
+    })
+    assert settings.status_code == 200
+    assert settings.json()["available_minutes"] == 18
+    confidence = client.put("/api/study/confidence", json={"page_path": PAGE, "confidence": 1})
+    assert confidence.status_code == 200
+    concepts = client.get("/api/concepts").json()["concepts"]
+    assert next(item for item in concepts if item["path"] == PAGE)["mastery"]["self_confidence"] == 1
+    action = client.get("/api/study/home").json()
+    assert action["reason"] == "contextual_evidence"
+    assert action["estimated_minutes"] >= 1
+    assert action["benefit"]
+    assert action["why"]
+
+
+def test_weekly_report_exposes_error_clusters_progress_evidence_and_priorities(wiki):
+    created = client.post("/api/study/sessions", json={
+        "page_path": PAGE,
+        "explanation": "查询改写有用，但我没有说明对象、因果步骤或适用条件。",
+    }).json()
+    card = created["cards"][0]
+    answer = "。".join(card["required_points"]) + "。我会把这些要点回到当前资料逐条核对。"
+    checked = client.post(f"/api/study/reviews/{card['id']}/attempt", json={"agent": "strict", "answer": answer})
+    assert checked.status_code == 200
+    report = client.get("/api/study/weekly-report")
+    assert report.status_code == 200
+    diagnostic = report.json()["diagnostic"]
+    assert diagnostic["recurring_error_clusters"]
+    assert diagnostic["progress_evidence"]
+    assert 1 <= len(diagnostic["next_week_priorities"]) <= 3
 
 
 def test_review_schedule_changes_by_rating(wiki):

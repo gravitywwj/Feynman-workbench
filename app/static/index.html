@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>费曼学习工作台</title>
-<link rel="stylesheet" href="/static/style.css?v=20260819-home-reminder-filters">
+<link rel="stylesheet" href="/static/style.css?v=20260824-idea-discussion-voice">
 </head>
 <body>
 
@@ -32,6 +32,7 @@
     <div class="desktop-actions">
       <button id="btn-theme-toggle" class="btn btn-quiet" type="button" aria-pressed="false">夜间阅读</button>
       <button id="btn-history" class="btn btn-quiet" type="button">学习记录</button>
+      <button id="btn-ideas" class="btn btn-quiet" type="button">想法讨论</button>
       <button id="btn-graph" class="btn btn-quiet">知识图谱</button>
       <button id="btn-review" class="btn btn-quiet">复习模块</button>
       <button id="btn-workspace" class="btn btn-quiet" type="button">设置</button>
@@ -42,6 +43,7 @@
 
 <nav id="mobile-menu" class="mobile-menu hidden" aria-label="更多功能">
   <button id="btn-mobile-history" class="btn btn-quiet" type="button">学习记录</button>
+  <button id="btn-mobile-ideas" class="btn btn-quiet" type="button">想法讨论</button>
   <button id="btn-mobile-theme" class="btn btn-quiet" type="button">切换夜间阅读</button>
   <button id="btn-mobile-workspace" class="btn btn-quiet" type="button">设置</button>
 </nav>
@@ -130,6 +132,14 @@
           <button class="act-btn" data-field="importance" data-value="low" aria-pressed="false">低</button>
           <button class="act-btn act-clear" data-field="importance" data-value="">清除</button>
         </div>
+        <div class="act-group confidence-group">
+          <span class="act-label">当前把握</span>
+          <button class="confidence-btn" data-confidence="1" aria-pressed="false" title="很不确定">1</button>
+          <button class="confidence-btn" data-confidence="2" aria-pressed="false" title="不太确定">2</button>
+          <button class="confidence-btn" data-confidence="3" aria-pressed="false" title="一般">3</button>
+          <button class="confidence-btn" data-confidence="4" aria-pressed="false" title="较有把握">4</button>
+          <button class="confidence-btn" data-confidence="5" aria-pressed="false" title="很有把握">5</button>
+        </div>
       </div>
 
       <section class="reference-card" aria-labelledby="reference-title">
@@ -195,7 +205,7 @@
       </section>
 
       <section class="panel dashboard-record-card" aria-labelledby="dashboard-mastery-title">
-        <div class="panel-head"><h2 id="dashboard-mastery-title">掌握变化</h2><span id="dashboard-stable-count" class="dashboard-count stable">0</span></div>
+        <div class="panel-head"><h2 id="dashboard-mastery-title">掌握变化</h2><span id="dashboard-maintaining-count" class="dashboard-count maintaining">0</span></div>
         <p id="dashboard-mastery-hint">本周的掌握证据会在这里汇总。</p>
         <div id="dashboard-mastery-list" class="dashboard-list"></div>
         <button id="btn-dashboard-report" class="text-btn" type="button">查看本周报告</button>
@@ -203,7 +213,7 @@
 
       <section class="panel dashboard-record-card dashboard-needs-card" aria-labelledby="dashboard-needs-title">
         <div class="panel-head"><h2 id="dashboard-needs-title">需要补洞</h2><span id="dashboard-needs-count" class="dashboard-count">0</span></div>
-        <p id="dashboard-needs-hint">优先选择尚未形成稳定理解的知识点。</p>
+        <p id="dashboard-needs-hint">优先选择尚未形成可核对理解的知识点。</p>
         <div id="dashboard-needs-list" class="dashboard-list"></div>
         <button id="btn-dashboard-needs" class="text-btn" type="button">查看全部知识点</button>
       </section>
@@ -268,8 +278,9 @@
       </div>
       <div class="graph-legend mastery-legend" aria-label="掌握状态图例">
         <span class="lg-item"><span class="mastery-dot unseen"></span>未接触</span>
-        <span class="lg-item"><span class="mastery-dot revised"></span>已复述</span>
-        <span class="lg-item"><span class="mastery-dot stable"></span>稳定掌握</span>
+        <span class="lg-item"><span class="mastery-dot recalled"></span>能回忆</span>
+        <span class="lg-item"><span class="mastery-dot checked"></span>已核对</span>
+        <span class="lg-item"><span class="mastery-dot maintaining"></span>保持中</span>
       </div>
       <button id="btn-graph-focus-current" class="btn btn-quiet" type="button">定位当前页</button>
       <button id="btn-graph-fit" class="btn btn-quiet" type="button">适配视野</button>
@@ -358,6 +369,33 @@
   </div>
 </div>
 
+<div id="ideas-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="ideas-title">
+  <div class="modal-card ideas-modal-card">
+    <div class="modal-head">
+      <div><p class="eyebrow">独立想法讨论</p><h2 id="ideas-title">把灵感讲清楚，再决定是否入库</h2></div>
+      <button class="btn-close" id="btn-close-ideas" type="button" aria-label="关闭">稍后继续</button>
+    </div>
+    <p id="ideas-hint" class="modal-hint">这里不属于复习会话。随时记录一个想法，Agent 会先给出证据边界内的初步判断。</p>
+    <div class="ideas-workspace">
+      <aside class="ideas-list-panel" aria-label="想法列表">
+        <button id="btn-new-idea" class="btn btn-primary full-width" type="button">记录一个新想法</button>
+        <div id="ideas-list" class="ideas-list"><p class="ideas-empty">正在读取想法…</p></div>
+      </aside>
+      <section id="idea-detail" class="idea-detail" aria-live="polite">
+        <div class="idea-compose">
+          <p class="eyebrow">新的想法</p>
+          <h3>先说出来，不必先证明它</h3>
+          <label class="field-label" for="idea-title-input">标题（可选）<input id="idea-title-input" maxlength="120" placeholder="例如：我怀疑上下文长度会改变检索策略"></label>
+          <label class="field-label" for="idea-input">想法内容<textarea id="idea-input" maxlength="10000" placeholder="描述你突然想到的判断、直觉、问题或项目联想…"></textarea></label>
+          <div class="voice-controls idea-voice-controls"><button id="btn-voice-idea" class="btn btn-quiet" type="button">开始口述</button><span id="idea-voice-status" aria-live="polite">可使用浏览器语音输入，也可继续键入。</span></div>
+          <label id="idea-related-label" class="idea-related hidden"><input id="idea-related-current" type="checkbox"> 关联当前学习页「<span id="idea-related-title"></span>」（可选）</label>
+          <div class="idea-compose-footer"><span id="idea-compose-status">想法会先保存为独立讨论，不会自动写入 Wiki。</span><button id="btn-create-idea" class="btn btn-primary" type="button">开始讨论</button></div>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
 <div id="recall-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="recall-title">
   <div class="modal-card recall-modal-card">
     <div class="modal-head">
@@ -385,7 +423,17 @@
 
     <div id="recall-editor" class="recall-stage hidden">
       <div class="assistant-message"><b>学习助手</b><p id="recall-editor-guide">从你最确定的一点开始，卡住是正常的；那正是下一步要核对的地方。</p></div>
-      <div class="clarity-checklist" aria-label="表达检查清单"><span>核心概念</span><span>关键机制</span><span>具体例子</span></div>
+      <fieldset id="recall-evidence" class="recall-evidence">
+        <legend>这次表达准备提供哪些理解证据？至少选择 2 项</legend>
+        <div class="recall-evidence-options">
+          <label><input type="checkbox" name="recall-evidence-key" value="definition"> 定义或目标</label>
+          <label><input type="checkbox" name="recall-evidence-key" value="mechanism"> 因果机制或步骤</label>
+          <label><input type="checkbox" name="recall-evidence-key" value="example"> 具体例子或场景</label>
+          <label><input type="checkbox" name="recall-evidence-key" value="boundary"> 适用边界或条件</label>
+        </div>
+        <p id="recall-evidence-status" class="recall-evidence-status" aria-live="polite">选择 2 到 3 项；系统会检查你的表达中是否真的出现这些内容。</p>
+      </fieldset>
+      <label class="recall-uncertainty" for="recall-uncertainty"><span>最不确定的一点（可选）</span><input id="recall-uncertainty" maxlength="300" placeholder="例如：我不确定这个方法在哪些条件下会失效"></label>
       <label class="sr-only" for="recall-input">你的回顾表达</label>
       <textarea id="recall-input" maxlength="2000" placeholder="不看资料，写下你现在能讲清楚的内容…"></textarea>
     <div class="voice-controls"><button id="btn-voice-recall" class="btn btn-quiet" type="button">开始口述</button><span id="voice-status" aria-live="polite">可使用浏览器语音输入，也可继续键入。</span></div>
@@ -434,7 +482,7 @@
       <div><p class="eyebrow">独立复习模块</p><h2 id="review-title">把记忆拉回来</h2></div>
       <button class="btn-close" id="btn-close-review" aria-label="关闭">关闭</button>
     </div>
-    <p class="modal-hint" id="review-modal-hint">先凭记忆作答，再用教练反馈与参考答案校对。</p>
+    <p class="modal-hint" id="review-modal-hint">先凭记忆作答，再用 Wiki 原文摘录与必备要点核对。</p>
     <div id="review-progress" class="review-progress" aria-live="polite"></div>
     <div class="review-principles" aria-label="复习原则">
       <span>主动回忆优先</span><span>默认节奏：1 天、3 天、7 天</span><span>评分决定下一次间隔</span>
@@ -497,10 +545,19 @@
       <label><input type="radio" name="learning-goal" value="exam"> 考前突击</label>
       <label><input type="radio" name="learning-goal" value="presentation"> 项目汇报</label>
     </fieldset>
+    <section class="learning-context" aria-labelledby="learning-context-title">
+      <div><h3 id="learning-context-title">推荐上下文</h3><p>只用于排序今天的下一步，不会改变你的 Wiki 内容或掌握等级。</p></div>
+      <div class="learning-context-grid">
+        <label class="field-label">考试日期（可选）<input id="exam-date" type="date"></label>
+        <label class="field-label">今日可用时间（分钟）<input id="available-minutes" type="number" min="5" max="480" value="25"></label>
+      </div>
+      <div class="section-weight-head"><span>章节权重</span><small>1 = 次要，5 = 重点</small></div>
+      <div id="section-weight-list" class="section-weight-list" aria-live="polite"></div>
+    </section>
     <div class="modal-footer"><span id="workspace-status" aria-live="polite"></span><button id="btn-save-workspace" class="btn btn-primary" type="button">保存学习空间</button></div>
   </div>
 </div>
 
-<script src="/static/app.js?v=20260819-home-reminder-filters"></script>
+<script src="/static/app.js?v=20260824-idea-discussion-voice"></script>
 </body>
 </html>

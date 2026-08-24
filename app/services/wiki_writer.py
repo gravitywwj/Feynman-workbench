@@ -140,6 +140,35 @@ def create_linked_idea_page(source_path: str, title: str, content: str, update_i
     return {"path": relative_path, "before_content": "", "after_content": after, "created_page": True}
 
 
+def create_standalone_idea_page(title: str, content: str, idea_id: int) -> dict:
+    """Create a Wiki page for an idea that is not attached to a study session."""
+    clean_title = re.sub(r"[\\/:*?\"<>|]+", "-", title).strip()[:80] or "学习想法"
+    clean_title = re.sub(r"[\r\n]+", " ", clean_title).strip() or "学习想法"
+    slug = re.sub(r"[^\w\u4e00-\u9fff-]+", "-", clean_title).strip("-") or "learning-idea"
+    ideas_dir = get_wiki_path() / "pages" / "学习想法"
+    ideas_dir.mkdir(parents=True, exist_ok=True)
+    suffix = datetime.now().strftime("%Y%m%d-%H%M%S")
+    target = ideas_dir / f"{slug}-{suffix}.md"
+    counter = 2
+    while target.exists():
+        target = ideas_dir / f"{slug}-{suffix}-{counter}.md"
+        counter += 1
+    after = _normalized(
+        f"---\n"
+        f"title: {clean_title}\n"
+        f"type: learning-idea\n"
+        f"created: {datetime.now().date().isoformat()}\n"
+        f"---\n\n"
+        f"# {clean_title}\n\n"
+        f"{LEARNING_SECTION}\n\n"
+        f"{content.strip()}\n\n"
+        f"<!-- feynman-workbench:idea:{idea_id} -->\n"
+    )
+    target.write_text(after, encoding="utf-8", newline="\n")
+    relative_path = target.relative_to(get_wiki_path() / "pages").as_posix()
+    return {"path": relative_path, "before_content": "", "after_content": after, "created_page": True}
+
+
 def restore_revision(path: str, before_content: str, after_content: str, *, created_page: bool) -> None:
     """Undo only when the Wiki page still matches the recorded post-write state."""
     file_path = _validate(path)

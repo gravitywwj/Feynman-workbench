@@ -68,6 +68,130 @@ STRUCTURE_CHECKS = (
 )
 
 
+# These are deliberately observable expression signals, not a claim that a
+# keyword match proves factual understanding.  The learner chooses two or
+# three before submitting; the service then verifies that those signals are
+# actually present in the expression.
+UNDERSTANDING_EVIDENCE = (
+    {
+        "key": "definition",
+        "label": "定义或目标",
+        "pattern": r"是|指|用于|用来|解决|目标|作用|流程|系统|应用|模型|工具",
+        "suggestion": "用一句话说明：它是什么，或它要解决什么问题。",
+    },
+    {
+        "key": "mechanism",
+        "label": "因果机制或步骤",
+        "pattern": r"→|->|⇒|先.{0,30}(再|然后)|(?:提供|返回|执行|校验|调用|回传|传入|输出).{0,36}(?:返回|执行|校验|调用|回传|结果|模型|工具)|通过.{0,36}(使|让|来|从而)|因为.{0,36}(所以|因此|从而)|步骤|流程|机制",
+        "suggestion": "把关键步骤用“先…再…”或“因为…所以…”连成一条链。",
+    },
+    {
+        "key": "example",
+        "label": "具体例子或场景",
+        "pattern": r"例如|比如|举例|场景|案例|好比|就像",
+        "suggestion": "补一个真实场景或例子，说明它具体怎样发挥作用。",
+    },
+    {
+        "key": "boundary",
+        "label": "适用边界或条件",
+        "pattern": r"权限|非法|超时|异常|注入|边界|失败|限制|风险|条件|反例|不适用|前提",
+        "suggestion": "写出一个条件、限制或反例，说明它不总是在所有情况下成立。",
+    },
+)
+
+
+# These names describe the *kind of repair to practise*, rather than claiming a
+# diagnosis is factually correct.  Older exports used missing/wrong/vague; keep
+# accepting them so a local knowledge base can be upgraded without migration of
+# user records.
+GAP_TYPE_ALIASES = {
+    "missing": "concept_missing",
+    "wrong": "causal_error",
+    "vague": "concept_missing",
+    "concept_missing": "concept_missing",
+    "causal_error": "causal_error",
+    "boundary_missing": "boundary_missing",
+    "transfer_failure": "transfer_failure",
+}
+
+GAP_TYPE_META = {
+    "concept_missing": {
+        "label": "概念缺失",
+        "goal": "补出对象、目标和一句可核对的定义。",
+        "practice_prompt": "用一句话补全：它是什么、解决什么问题；再指出资料中支持这句话的一处原文。",
+        "retest_prompt": "换一个没有出现在原笔记里的场景：它仍然解决什么问题？先说对象和目标，再说明为什么。",
+    },
+    "causal_error": {
+        "label": "因果链错误",
+        "goal": "把输入、关键步骤和结果连成可检验的因果链。",
+        "practice_prompt": "写出一条“因为…所以…”或“先…再…”链：每一步如何导致下一步？用资料中的一处依据核对。",
+        "retest_prompt": "换一个输入或约束条件：关键步骤会怎样变化，结果为什么会随之变化？请写完整因果链。",
+    },
+    "boundary_missing": {
+        "label": "边界条件遗漏",
+        "goal": "说明这套说法何时成立、何时需要额外条件。",
+        "practice_prompt": "补一个成立条件、限制或反例：少了它会发生什么？回原文找出对应条件。",
+        "retest_prompt": "换一个更苛刻的条件或反例：原结论还能直接成立吗？说明需要补上的限制。",
+    },
+    "transfer_failure": {
+        "label": "例子迁移失败",
+        "goal": "把规则迁移到一个新场景，而不是只复述原例。",
+        "practice_prompt": "选择一个与你资料不同的真实小场景，说明这条规则怎样应用，以及哪一步最关键。",
+        "retest_prompt": "再换一个领域或任务场景：用同一规则作判断，并说明为什么不是简单套用原例。",
+    },
+}
+
+
+def normalize_gap_type(value: object) -> str:
+    return GAP_TYPE_ALIASES.get(str(value or "").strip(), "concept_missing")
+
+
+def gap_type_meta(value: object) -> dict:
+    return GAP_TYPE_META[normalize_gap_type(value)]
+
+
+def _normalise_evidence_keys(evidence_keys: list[str] | None) -> list[str]:
+    allowed = {item["key"] for item in UNDERSTANDING_EVIDENCE}
+    selected: list[str] = []
+    for value in evidence_keys or []:
+        key = str(value).strip()
+        if key in allowed and key not in selected:
+            selected.append(key)
+    return selected
+
+
+def inspect_understanding_evidence(text: str, evidence_keys: list[str] | None = None) -> dict:
+    """Return selected evidence alongside the learner sentences that show it."""
+    sentences = _sentences(text.strip())
+    selected = _normalise_evidence_keys(evidence_keys)
+    checks = []
+    for definition in UNDERSTANDING_EVIDENCE:
+        evidence = _evidence_sentences(sentences, definition["pattern"])
+        if definition["key"] == "definition" and not evidence and (len(text.strip()) >= 8 or sentences):
+            evidence = [sentences[0][:180]] if sentences else []
+        checks.append({
+            "key": definition["key"],
+            "label": definition["label"],
+            "selected": definition["key"] in selected,
+            "passed": bool(evidence),
+            "evidence": evidence,
+            "suggestion": definition["suggestion"],
+        })
+    return {"selected": selected, "checks": checks}
+
+
+def require_understanding_evidence(text: str, evidence_keys: list[str]) -> dict:
+    """Require two to three learner-chosen, visible forms of understanding."""
+    selected = _normalise_evidence_keys(evidence_keys)
+    if not 2 <= len(selected) <= 3:
+        raise ValueError("请任选 2 到 3 项理解证据：定义或目标、因果机制、具体例子、适用边界。")
+    result = inspect_understanding_evidence(text, selected)
+    missing = [item["label"] for item in result["checks"] if item["selected"] and not item["passed"]]
+    if missing:
+        raise ValueError(f"你已选择“{'、'.join(missing)}”，但表达中还没有可观察到的对应内容。请补充后再诊断。")
+    return result
+
+
 # These terms are not a subject-matter rubric.  They are concrete details that
 # often disappear when a learner turns a full explanation into a short one.
 # Keeping the list deliberately small lets the offline comparison explain its
@@ -198,19 +322,40 @@ def explain_structure(text: str) -> dict:
     }
 
 
-def local_diagnosis(explanation: str, title: str) -> tuple[list[dict], str]:
+def local_diagnosis(explanation: str, title: str, uncertainty: str = "") -> tuple[list[dict], str]:
     """Generate explainable expression prompts for an offline learning session."""
     structure = explain_structure(explanation)
+    check_types = {
+        "core": "concept_missing",
+        "mechanism": "causal_error",
+        "boundary_or_example": "transfer_failure",
+    }
     gaps = [
         {
-            "gap_type": "vague" if check["key"] == "core" else "missing",
+            "gap_type": check_types.get(check["key"], "concept_missing"),
             "content": check["suggestion"],
             "check_key": check["key"],
             "evidence": check["evidence"],
         }
         for check in structure["checks"] if not check["passed"]
     ]
-    question = f"不用术语重述「{title}」：它解决什么问题，关键步骤怎样衔接？"
+    focus = uncertainty.strip()[:300]
+    if focus:
+        focus_type = (
+            "boundary_missing" if re.search(r"边界|条件|限制|风险|异常|反例", focus)
+            else "transfer_failure" if re.search(r"例子|场景|迁移|应用", focus)
+            else "causal_error" if re.search(r"原因|机制|步骤|为什么|因果", focus)
+            else "concept_missing"
+        )
+        gaps.insert(0, {
+            "gap_type": focus_type,
+            "content": f"你标记的最不确定点是「{focus}」。先回到当前资料，找出支持或反驳它的原文依据。",
+            "check_key": "uncertainty",
+            "evidence": [],
+        })
+        question = f"先处理你标记的不确定点「{focus}」：资料中的哪句话、步骤或条件能帮助你核对它？"
+    else:
+        question = f"不用术语重述「{title}」：它解决什么问题，关键步骤怎样衔接？"
     return gaps, question
 
 
@@ -232,9 +377,9 @@ def _normalize_gaps(raw_gaps: object) -> list[dict]:
         if not isinstance(gap, dict):
             continue
         content = str(gap.get("content", "")).strip()
-        gap_type = str(gap.get("gap_type", "vague")).strip()
-        if content and gap_type in {"missing", "wrong", "vague"}:
-            normalized.append({"gap_type": gap_type, "content": content[:500]})
+        raw_type = str(gap.get("gap_type", "concept_missing")).strip()
+        if content and raw_type in GAP_TYPE_ALIASES:
+            normalized.append({"gap_type": normalize_gap_type(raw_type), "content": content[:500]})
     return normalized
 
 
@@ -389,17 +534,208 @@ def analyze_knowledge_note(
         return local
 
 
-def diagnose(explanation: str, title: str, reference_html: str, persona: str | None = None) -> tuple[list[dict], str, str]:
+IDEA_VERDICTS = {
+    "supported": "有本地依据",
+    "plausible": "有一定合理性",
+    "uncertain": "待验证",
+    "problematic": "存在明显疑点",
+}
+
+
+def _idea_evidence_text(evidence: list[dict]) -> str:
+    return "\n\n".join(
+        f"[{item.get('title', '')} | {item.get('path', '')}]\n{item.get('excerpt', '')}"
+        for item in evidence[:5]
+    ) or "（没有命中本地 Wiki 页面）"
+
+
+def _idea_local_assessment(note: str, evidence: list[dict]) -> dict:
+    """Keep offline mode honest: retrieval is evidence, not a truth verdict."""
+    supporting = [
+        f"本地 Wiki 命中：{item.get('title', '')}（{item.get('path', '')}）"
+        for item in evidence[:3]
+    ]
+    return {
+        "verdict": "uncertain",
+        "verdict_label": IDEA_VERDICTS["uncertain"],
+        "confidence": "低",
+        "summary": "这是一条值得继续拆解的想法，但当前本地模式不能判断它在事实或实践上是否正确。",
+        "supporting_points": supporting or ["暂未找到可直接对照的本地 Wiki 依据。"],
+        "concerns": ["还没有把想法拆成可检验的前提、机制和边界。"],
+        "open_questions": ["如果这个想法成立，最小的可观察证据或反例是什么？"],
+        "next_question": "你认为这个想法成立的关键前提是什么？请给一个具体场景或例子。",
+        "source": "local",
+    }
+
+
+def assess_idea(*, note: str, evidence: list[dict], persona: str | None = None) -> dict:
+    """Give an evidence-bounded first assessment for a standalone learner idea."""
+    persona_key = normalize_persona(persona)
+    local = _idea_local_assessment(note.strip(), evidence)
+    config = get_llm_config()
+    if config.get("mode") != "ai" or not config.get("api_key"):
+        return local
+    persona_spec = PERSONAS[persona_key]
+    try:
+        payload = _clean_json(_call_llm(config, [
+            {
+                "role": "system",
+                "content": (
+                    "你是个人知识库中的想法评估伙伴。先判断学习者的想法目前处于什么证据状态，"
+                    "不要把推测包装成事实。只能使用提供的本地 Wiki 片段；若证据不足必须标为 uncertain。"
+                    + persona_spec["instruction"] +
+                    "返回纯 JSON：{\"verdict\":\"supported|plausible|uncertain|problematic\","
+                    "\"confidence\":\"高|中|低\",\"summary\":\"一句判断\","
+                    "\"supporting_points\":[\"依据\"],\"concerns\":[\"疑点\"],"
+                    "\"open_questions\":[\"待验证问题\"],\"next_question\":\"下一轮具体问题\"}。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"学习者的想法：\n{note[:8000]}\n\n本地 Wiki 依据：\n{_idea_evidence_text(evidence)[:12000]}",
+            },
+        ]))
+        verdict = str(payload.get("verdict") or "uncertain").strip()
+        if verdict not in IDEA_VERDICTS:
+            verdict = "uncertain"
+        return {
+            "verdict": verdict,
+            "verdict_label": IDEA_VERDICTS[verdict],
+            "confidence": str(payload.get("confidence") or "低").strip()[:10],
+            "summary": str(payload.get("summary") or local["summary"]).strip()[:1200],
+            "supporting_points": _json_string_list(payload.get("supporting_points"), 4) or local["supporting_points"],
+            "concerns": _json_string_list(payload.get("concerns"), 4) or local["concerns"],
+            "open_questions": _json_string_list(payload.get("open_questions"), 4) or local["open_questions"],
+            "next_question": str(payload.get("next_question") or local["next_question"]).strip()[:600],
+            "source": "llm",
+        }
+    except Exception:
+        return local
+
+
+def discuss_idea(
+    *, idea: str, history: list[dict], evidence: list[dict], persona: str | None = None,
+) -> dict:
+    """Respond to one new idea turn while keeping the assessment provisional."""
+    local = _idea_local_assessment(idea.strip(), evidence)
+    local["summary"] = "我先把这一轮内容放回原来的想法中看：目前可以继续推演，但还不能把它当成已验证结论。"
+    local["reply"] = (
+        "这一步补充了一个值得检查的方向。为了避免过早下结论，请把它拆成："
+        "前提是什么、机制如何发生、以及什么情况会让它失效。"
+    )
+    local["next_question"] = "如果只能设计一个最小验证，你会观察什么结果来支持或否定这个想法？"
+    config = get_llm_config()
+    if config.get("mode") != "ai" or not config.get("api_key"):
+        return local
+    persona_spec = PERSONAS[normalize_persona(persona)]
+    transcript = "\n\n".join(
+        f"{item.get('role', 'user')}: {item.get('content', '')}" for item in history[-10:]
+    ) or "（这是第一轮补充）"
+    try:
+        payload = _clean_json(_call_llm(config, [
+            {
+                "role": "system",
+                "content": (
+                    "你是学习者的想法讨论伙伴。基于整段对话推进讨论：先指出这一轮补充改变了什么，"
+                    "再给出暂定判断、依据、隐含前提和一个下一步问题。只依据本地 Wiki 片段，"
+                    "无法确认时必须明确说待验证。" + persona_spec["instruction"] +
+                    "返回纯 JSON：{\"verdict\":\"supported|plausible|uncertain|problematic\","
+                    "\"confidence\":\"高|中|低\",\"summary\":\"一句判断\","
+                    "\"reply\":\"给学习者的自然语言回应\",\"supporting_points\":[\"依据\"],"
+                    "\"concerns\":[\"隐含前提或风险\"],\"open_questions\":[\"待验证问题\"],"
+                    "\"next_question\":\"下一轮具体问题\"}。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"已有对话：\n{transcript[:16000]}\n\n本轮新内容：\n{idea[:8000]}\n\n本地 Wiki 依据：\n{_idea_evidence_text(evidence)[:10000]}",
+            },
+        ]))
+        verdict = str(payload.get("verdict") or "uncertain").strip()
+        if verdict not in IDEA_VERDICTS:
+            verdict = "uncertain"
+        return {
+            "verdict": verdict,
+            "verdict_label": IDEA_VERDICTS[verdict],
+            "confidence": str(payload.get("confidence") or "低").strip()[:10],
+            "summary": str(payload.get("summary") or local["summary"]).strip()[:1200],
+            "reply": str(payload.get("reply") or local["reply"]).strip()[:3000],
+            "supporting_points": _json_string_list(payload.get("supporting_points"), 4) or local["supporting_points"],
+            "concerns": _json_string_list(payload.get("concerns"), 4) or local["concerns"],
+            "open_questions": _json_string_list(payload.get("open_questions"), 4) or local["open_questions"],
+            "next_question": str(payload.get("next_question") or local["next_question"]).strip()[:600],
+            "source": "llm",
+        }
+    except Exception:
+        return local
+
+
+def summarize_idea_conversation(
+    *, title: str, initial_content: str, turns: list[dict], evidence: list[dict], persona: str | None = None,
+) -> dict:
+    """Compress a complete idea discussion into an editable Wiki draft."""
+    local = {
+        "summary": "已把想法讨论整理为待审核草案；其中仍需验证的部分会保留为开放问题。",
+        "draft_title": title.strip()[:120] or "未命名学习想法",
+        "draft_content": (
+            f"## 想法\n\n{initial_content.strip()[:1800]}\n\n"
+            "## 讨论结论\n\n"
+            "当前讨论尚不足以确认事实正确性。请在继续实践或查阅原始资料后更新这条记录。\n\n"
+            "## 待验证问题\n\n- 设计一个最小例子，观察什么结果能够支持或否定这个想法？"
+        ),
+        "open_questions": ["设计一个最小验证，明确支持或否定该想法的观察结果。"],
+        "source": "local",
+    }
+    config = get_llm_config()
+    if config.get("mode") != "ai" or not config.get("api_key"):
+        return local
+    transcript = "\n\n".join(
+        f"{item.get('role', 'user')}: {item.get('content', '')}" for item in turns
+    )
+    try:
+        payload = _clean_json(_call_llm(config, [
+            {
+                "role": "system",
+                "content": (
+                    "你负责把一段学习者与 Agent 的想法讨论整理成个人 Wiki 草稿。"
+                    "只使用对话和提供的本地 Wiki 片段，不新增外部事实。把已形成的判断、仍不确定的边界、"
+                    "可执行的验证动作分开写。返回纯 JSON：{\"summary\":\"一句总结\","
+                    "\"draft_title\":\"页面标题\",\"draft_content\":\"不含一级标题的 Markdown 正文\","
+                    "\"open_questions\":[\"开放问题\"]}。draft_content 不超过 3000 字。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"想法标题：{title}\n\n初始想法：\n{initial_content[:7000]}\n\n讨论记录：\n{transcript[:18000]}\n\n本地 Wiki 依据：\n{_idea_evidence_text(evidence)[:9000]}",
+            },
+        ]))
+        draft_content = str(payload.get("draft_content") or "").strip()[:5000]
+        if not draft_content:
+            raise ValueError("没有生成 Wiki 草稿")
+        return {
+            "summary": str(payload.get("summary") or local["summary"]).strip()[:1200],
+            "draft_title": str(payload.get("draft_title") or local["draft_title"]).strip()[:120],
+            "draft_content": draft_content,
+            "open_questions": _json_string_list(payload.get("open_questions"), 5) or local["open_questions"],
+            "source": "llm",
+        }
+    except Exception:
+        return local
+
+
+def diagnose(
+    explanation: str, title: str, reference_html: str, persona: str | None = None, uncertainty: str = "",
+) -> tuple[list[dict], str, str]:
     """返回 (盲区, 下一问, 来源)，模型异常时不影响学习流程。"""
     persona_spec = PERSONAS[normalize_persona(persona)]
     config = get_llm_config()
     if config.get("mode") != "ai" or not config["api_key"]:
-        gaps, question = local_diagnosis(explanation, title)
+        gaps, question = local_diagnosis(explanation, title, uncertainty)
         return gaps, question, "local"
     try:
         content = _call_llm(config, [
-                {"role": "system", "content": "你是费曼学习教练。只依据参考资料检查学习者讲解，不要编造事实。" + persona_spec["instruction"] + "返回纯 JSON：{\"gaps\":[{\"gap_type\":\"missing|wrong|vague\",\"content\":\"简洁、可行动的中文反馈\"}],\"question\":\"一个下一步追问\"}。盲区最多 3 条。"},
-                {"role": "user", "content": f"知识点：{title}\n\n参考资料：\n{reference_html[:12000]}\n\n学习者讲解：\n{explanation[:10000]}"},
+                {"role": "system", "content": "你是费曼学习教练。只依据参考资料检查学习者讲解，不要编造事实。" + persona_spec["instruction"] + "如果学习者标记了最不确定点，第一条反馈和下一问必须直接帮助他核对该点。返回纯 JSON：{\"gaps\":[{\"gap_type\":\"concept_missing|causal_error|boundary_missing|transfer_failure\",\"content\":\"简洁、可行动的中文反馈\"}],\"question\":\"一个下一步追问\"}。盲区最多 3 条。"},
+                {"role": "user", "content": f"知识点：{title}\n\n参考资料：\n{reference_html[:12000]}\n\n学习者标记的最不确定点：\n{uncertainty.strip()[:300] or '未标记'}\n\n学习者讲解：\n{explanation[:10000]}"},
             ])
         payload = _clean_json(content)
         gaps = _normalize_gaps(payload.get("gaps"))
@@ -408,7 +744,7 @@ def diagnose(explanation: str, title: str, reference_html: str, persona: str | N
             raise ValueError("模型没有给出下一问")
         return gaps, question, "llm"
     except Exception:
-        gaps, question = local_diagnosis(explanation, title)
+        gaps, question = local_diagnosis(explanation, title, uncertainty)
         return gaps, question, "local"
 
 

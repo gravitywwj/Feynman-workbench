@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -149,6 +149,26 @@ def get_workspace_settings() -> dict:
     learning_goal = stored.get("learning_goal", "long_term")
     if learning_goal not in {"exam", "presentation", "long_term"}:
         learning_goal = "long_term"
+    raw_exam_date = str(stored.get("exam_date") or "").strip()
+    try:
+        exam_date = date.fromisoformat(raw_exam_date).isoformat() if raw_exam_date else ""
+    except ValueError:
+        exam_date = ""
+    try:
+        available_minutes = min(480, max(5, int(stored.get("available_minutes", 25))))
+    except (TypeError, ValueError):
+        available_minutes = 25
+    raw_weights = stored.get("section_weights", {})
+    section_weights = {}
+    if isinstance(raw_weights, dict):
+        for section, weight in raw_weights.items():
+            name = str(section).strip()[:120]
+            try:
+                value = int(weight)
+            except (TypeError, ValueError):
+                continue
+            if name and 1 <= value <= 5:
+                section_weights[name] = value
     return {
         "mode": mode,
         "wiki_path": str(wiki_path),
@@ -157,12 +177,16 @@ def get_workspace_settings() -> dict:
         "ai_available": bool(llm["api_key"]),
         "daily_review_goal": daily_review_goal,
         "learning_goal": learning_goal,
+        "exam_date": exam_date,
+        "available_minutes": available_minutes,
+        "section_weights": section_weights,
         "uses_environment_path": bool(explicit_wiki),
     }
 
 
 def save_workspace_settings(
-    *, mode: str, wiki_path: str | None, diagnostic_mode: str, daily_review_goal: int, learning_goal: str = "long_term"
+    *, mode: str, wiki_path: str | None, diagnostic_mode: str, daily_review_goal: int, learning_goal: str = "long_term",
+    exam_date: str = "", available_minutes: int = 25, section_weights: dict[str, int] | None = None,
 ) -> dict:
     """Persist user choices. An explicit environment path remains deployment authority."""
     if mode not in {"local", "demo"}:
@@ -173,6 +197,29 @@ def save_workspace_settings(
         raise ValueError("每日复习目标应在 1 到 50 张之间")
     if learning_goal not in {"exam", "presentation", "long_term"}:
         raise ValueError("学习目标必须为 exam、presentation 或 long_term")
+    clean_exam_date = exam_date.strip()
+    if clean_exam_date:
+        try:
+            parsed_exam_date = date.fromisoformat(clean_exam_date)
+        except ValueError as exc:
+            raise ValueError("考试日期需要使用 YYYY-MM-DD 格式") from exc
+        if parsed_exam_date < date.today():
+            raise ValueError("考试日期不能早于今天")
+        clean_exam_date = parsed_exam_date.isoformat()
+    if not 5 <= available_minutes <= 480:
+        raise ValueError("今日可用学习时间应在 5 到 480 分钟之间")
+    clean_weights: dict[str, int] = {}
+    for section, weight in (section_weights or {}).items():
+        name = str(section).strip()
+        if not name or len(name) > 120:
+            raise ValueError("章节名称不能为空且不能超过 120 个字符")
+        try:
+            value = int(weight)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("章节权重需要是 1 到 5 的整数") from exc
+        if not 1 <= value <= 5:
+            raise ValueError("章节权重需要在 1 到 5 之间")
+        clean_weights[name] = value
     if mode == "local":
         if not wiki_path:
             raise ValueError("请输入 Wiki 文件夹路径")
@@ -189,6 +236,9 @@ def save_workspace_settings(
         "diagnostic_mode": diagnostic_mode,
         "daily_review_goal": daily_review_goal,
         "learning_goal": learning_goal,
+        "exam_date": clean_exam_date,
+        "available_minutes": available_minutes,
+        "section_weights": clean_weights,
     }
     temporary = SETTINGS_PATH.with_suffix(".tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

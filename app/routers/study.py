@@ -13,6 +13,8 @@ class SessionCreate(BaseModel):
     explanation: str = Field(min_length=1, max_length=10000)
     elapsed_seconds: int = Field(default=0, ge=0, le=86400)
     persona: str = Field(default="feynman", pattern="^(feynman|direct|exam|reflective)$")
+    evidence_keys: list[str] | None = Field(default=None, max_length=3)
+    uncertainty: str = Field(default="", max_length=300)
 
 
 class SessionSimplify(BaseModel):
@@ -68,6 +70,11 @@ class GapRevision(BaseModel):
     revision: str = Field(min_length=1, max_length=10000)
 
 
+class ConceptConfidenceSave(BaseModel):
+    page_path: str = Field(min_length=1, max_length=2000)
+    confidence: int = Field(ge=1, le=5)
+
+
 class DiagnosisFeedback(BaseModel):
     gap_id: int | None = Field(default=None, ge=1)
     verdict: str = Field(pattern="^(helpful|disputed)$")
@@ -84,6 +91,9 @@ class WorkspaceSettingsSave(BaseModel):
     diagnostic_mode: str = Field(pattern="^(local|ai)$")
     daily_review_goal: int = Field(default=5, ge=1, le=50)
     learning_goal: str = Field(default="long_term", pattern="^(exam|presentation|long_term)$")
+    exam_date: str = Field(default="", max_length=10)
+    available_minutes: int = Field(default=25, ge=5, le=480)
+    section_weights: dict[str, int] = Field(default_factory=dict)
 
 
 class LLMSettingsSave(BaseModel):
@@ -101,7 +111,10 @@ class LearningImport(BaseModel):
 @router.post("/sessions")
 def create_session(payload: SessionCreate) -> dict:
     try:
-        return study_sessions.create_session(payload.page_path, payload.explanation, payload.elapsed_seconds, payload.persona)
+        return study_sessions.create_session(
+            payload.page_path, payload.explanation, payload.elapsed_seconds, payload.persona,
+            payload.evidence_keys, payload.uncertainty,
+        )
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -377,6 +390,24 @@ def revise_gap(gap_id: int, payload: GapRevision) -> dict:
         raise HTTPException(status_code=400, detail=str(e))
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/gaps/{gap_id}/retest")
+def retest_gap(gap_id: int, payload: GapRevision) -> dict:
+    try:
+        return study_sessions.retest_gap(gap_id, payload.revision)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.put("/confidence")
+def save_concept_confidence(payload: ConceptConfidenceSave) -> dict:
+    try:
+        return study_sessions.set_self_confidence(payload.page_path, payload.confidence)
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/export")
