@@ -38,9 +38,13 @@ class KnowledgeUpdateCreate(BaseModel):
 
 
 class KnowledgeUpdateApply(BaseModel):
-    target_mode: str = Field(pattern="^(append_current|create_idea|keep_local)$")
+    target_mode: str = Field(pattern="^(append_current|append_pending|keep_local)$")
     proposal: str = Field(min_length=1, max_length=5000)
     proposed_title: str = Field(default="", max_length=120)
+
+
+class KnowledgeUpdateReview(BaseModel):
+    proposal: str = Field(min_length=1, max_length=5000)
 
 
 class ReflectionCreate(BaseModel):
@@ -272,6 +276,16 @@ def create_knowledge_update(payload: KnowledgeUpdateCreate) -> dict:
         return study_sessions.create_knowledge_update(payload.content, payload.page_path, payload.persona)
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/knowledge-updates/{update_id}/review")
+def review_knowledge_update(update_id: int, payload: KnowledgeUpdateReview) -> dict:
+    try:
+        return study_sessions.review_knowledge_update(update_id, payload.proposal)
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.post("/knowledge-updates/{update_id}/apply")

@@ -87,3 +87,27 @@ class TestBuildGraph:
         assert not any("不存在的页面" in a or "不存在的页面" in b for a, b in link_set)
         # agent-memory-system → query-rewriting
         assert ("AI/agents/agent-memory-system.md", "AI/rag/query-rewriting.md") in link_set
+
+
+def test_reviewed_update_stays_inside_existing_section(wiki):
+    page = wiki / "pages" / "AI" / "rag" / "query-rewriting.md"
+    page.write_text(page.read_text(encoding="utf-8") + "\n## 学习增量\n\n旧记录\n\n## 后续章节\n\n原内容\n", encoding="utf-8")
+    preview = wiki_writer.preview_reviewed_update(
+        "AI/rag/query-rewriting.md", "新记录", 7, kind="verified", citations=["raw/rag/xxx.md"],
+    )
+    after = preview["after_content"]
+    assert after.index("旧记录") < after.index("新记录") < after.index("## 后续章节")
+    assert "## 后续章节\n\n原内容" in after
+    assert "updated:" in after and "\ntype: concept" in after
+    assert "\n\n- [[query-rewriting]]" in preview["index_after"]
+
+
+def test_frontmatter_writer_rejects_personal_wiki(wiki, monkeypatch):
+    personal = wiki / "personal-wiki"
+    personal.mkdir()
+    monkeypatch.setenv("FEYNMAN_WIKI_PATH", str(personal))
+    try:
+        wiki_writer.update_frontmatter("AI/rag/query-rewriting.md", {"status": "read"})
+        assert False, "不能更新个人知识空间"
+    except ValueError as error:
+        assert "learning-wiki" in str(error)

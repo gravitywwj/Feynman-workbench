@@ -145,9 +145,10 @@ def test_note_can_be_reviewed_written_and_undone_through_knowledge_evolution(wik
         assert "待审核" in detail.inner_text()
         assert source.read_text(encoding="utf-8") == before
 
-        detail.get_by_role("button", name="确认并处理草案").click()
+        detail.get_by_role("button", name="审核草稿").click()
+        detail.get_by_role("button", name="确认为待验证问题").click()
         page.locator(".knowledge-applied").wait_for(state="visible")
-        assert "## 学习增量" in source.read_text(encoding="utf-8")
+        assert "## 待验证问题" in source.read_text(encoding="utf-8")
         page.get_by_role("button", name="撤销这次更新").click()
         page.get_by_text("已撤销", exact=True).wait_for(state="visible")
         assert source.read_text(encoding="utf-8") == before

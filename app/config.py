@@ -136,7 +136,7 @@ def get_workspace_settings() -> dict:
     stored = _stored_settings()
     explicit_wiki = os.environ.get("FEYNMAN_WIKI_PATH")
     mode = "local" if explicit_wiki else stored.get("mode", "local")
-    raw_path = explicit_wiki or stored.get("wiki_path") or r"D:\LLM wiki"
+    raw_path = explicit_wiki or stored.get("wiki_path") or r"D:\LLM wiki\learning-wiki"
     wiki_path = DEMO_WIKI_DIR if mode == "demo" else Path(raw_path)
     llm, _, _ = _effective_llm_values()
     diagnostic_mode = stored.get("diagnostic_mode") or ("ai" if llm["api_key"] else "local")

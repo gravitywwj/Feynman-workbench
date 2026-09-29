@@ -358,6 +358,7 @@ def test_recall_brief_uses_selected_persona_and_local_learning_evidence(wiki):
 def test_knowledge_update_requires_review_then_supports_safe_undo(wiki):
     source = wiki / "pages" / "AI" / "rag" / "query-rewriting.md"
     before = source.read_text(encoding="utf-8")
+    index_before = (wiki / "index.md").read_text(encoding="utf-8")
     created = client.post("/api/study/knowledge-updates", json={
         "page_path": PAGE,
         "persona": "reflective",
@@ -370,21 +371,81 @@ def test_knowledge_update_requires_review_then_supports_safe_undo(wiki):
     assert draft["evidence"]
     assert source.read_text(encoding="utf-8") == before
 
-    applied = client.post(f"/api/study/knowledge-updates/{draft['id']}/apply", json={
+    proposal = "改写前后应比较召回结果，并说明对象、场景与约束。"
+    blocked = client.post(f"/api/study/knowledge-updates/{draft['id']}/apply", json={
         "target_mode": "append_current",
-        "proposal": "- 学习记录：改写前后应比较召回结果，并说明对象、场景与约束。",
+        "proposal": proposal,
         "proposed_title": "",
+    })
+    assert blocked.status_code == 400
+
+    reviewed = client.post(f"/api/study/knowledge-updates/{draft['id']}/review", json={"proposal": proposal})
+    assert reviewed.status_code == 200
+    assert reviewed.json()["analysis"]["review"]["verdict"] == "uncertain"
+    assert "待验证问题" in reviewed.json()["analysis"]["review"]["diff"]
+
+    edited = client.post(f"/api/study/knowledge-updates/{draft['id']}/apply", json={
+        "target_mode": "append_pending", "proposal": proposal + "新增说法", "proposed_title": "",
+    })
+    assert edited.status_code == 400
+
+    applied = client.post(f"/api/study/knowledge-updates/{draft['id']}/apply", json={
+        "target_mode": "append_pending", "proposal": proposal, "proposed_title": "",
     })
     assert applied.status_code == 200
     assert applied.json()["status"] == "applied"
     written = source.read_text(encoding="utf-8")
-    assert "## 学习增量" in written
-    assert f"feynman-workbench:update:{draft['id']}" in written
+    assert "## 待验证问题" in written
+    assert f"feynman-workbench:{draft['id']}:tentative" in written
+    assert "## [" in (wiki / "log.md").read_text(encoding="utf-8")
 
     undone = client.post(f"/api/study/knowledge-updates/{draft['id']}/undo")
     assert undone.status_code == 200
     assert undone.json()["status"] == "undone"
     assert source.read_text(encoding="utf-8") == before
+    assert (wiki / "index.md").read_text(encoding="utf-8") == index_before
+    assert "undo | feynman-workbench" in (wiki / "log.md").read_text(encoding="utf-8")
+
+
+def test_supported_knowledge_delta_requires_raw_citation(wiki, monkeypatch):
+    from app.services import tutor
+
+    monkeypatch.setattr(tutor, "review_wiki_proposal", lambda **kwargs: {
+        "verdict": "supported", "feedback": "原文支持", "next_question": "",
+        "citations": ["raw/rag/xxx.md"], "source": "llm",
+    })
+    draft = client.post("/api/study/knowledge-updates", json={
+        "page_path": PAGE, "content": "查询改写需要补足对象、场景和约束。",
+    }).json()
+    review = client.post(f"/api/study/knowledge-updates/{draft['id']}/review", json={
+        "proposal": "查询改写应补足对象、场景和约束。",
+    }).json()["analysis"]["review"]
+    assert review["kind"] == "verified"
+    assert review["raw_evidence"][0]["path"] == "raw/rag/xxx.md"
+    result = client.post(f"/api/study/knowledge-updates/{draft['id']}/apply", json={
+        "target_mode": "append_current", "proposal": review["content"],
+    })
+    assert result.status_code == 200
+    page = (wiki / "pages" / PAGE).read_text(encoding="utf-8")
+    assert "## 学习增量" in page
+    assert "^[raw/rag/xxx.md]" in page
+
+
+def test_wiki_lint_failure_leaves_no_partial_write(wiki):
+    script = wiki / "scripts" / "lint_wiki.py"
+    script.parent.mkdir()
+    script.write_text("raise SystemExit(1)\n", encoding="utf-8")
+    page = wiki / "pages" / PAGE
+    snapshots = {path: path.read_text(encoding="utf-8") for path in (page, wiki / "index.md", wiki / "log.md")}
+    draft = client.post("/api/study/knowledge-updates", json={
+        "page_path": PAGE, "content": "我怀疑改写结果需要实验验证。",
+    }).json()
+    client.post(f"/api/study/knowledge-updates/{draft['id']}/review", json={"proposal": "需要实验验证改写结果。"})
+    result = client.post(f"/api/study/knowledge-updates/{draft['id']}/apply", json={
+        "target_mode": "append_pending", "proposal": "需要实验验证改写结果。",
+    })
+    assert result.status_code == 400
+    assert all(path.read_text(encoding="utf-8") == before for path, before in snapshots.items())
 
 
 def test_reflections_are_timestamped_exported_and_can_be_summarized(wiki):

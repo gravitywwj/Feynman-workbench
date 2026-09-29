@@ -611,6 +611,20 @@ function ideaAssessmentMarkup(assessment) {
   </section>`;
 }
 
+function wikiReviewMarkup(review) {
+  if (!review) return '<p class="knowledge-safeguard">最终草稿尚未审核；当前判断不能直接作为入库依据。</p>';
+  const verdict = { supported: '模型判断有原始资料支持', uncertain: '待验证', problematic: '模型发现错误或冲突' }[review.verdict] || '待验证';
+  const raw = (review.raw_evidence || []).map(source => `<li><b>${esc(source.path)}</b><p>${esc(source.excerpt || '')}</p></li>`).join('');
+  return `<section class="wiki-final-review" aria-live="polite">
+    <h4>最终审核：${esc(verdict)}</h4><p>${esc(review.feedback || '')}</p>
+    ${review.next_question ? `<p>待核对：${esc(review.next_question)}</p>` : ''}
+    ${review.citations?.length ? `<p>核实依据：${review.citations.map(esc).join('、')}</p>` : ''}
+    ${raw ? `<details><summary>查看本次使用的原始资料摘录</summary><ul>${raw}</ul></details>` : ''}
+    ${review.diff ? `<details open><summary>拟写入页面的差异</summary><pre class="wiki-review-diff">${esc(review.diff)}</pre></details>` : ''}
+    ${review.verdict === 'uncertain' ? '<p>写回后只列在“待验证问题”，不能视为事实。</p>' : ''}
+  </section>`;
+}
+
 function ideaTurnMarkup(turn) {
   const meta = turn.metadata || {};
   return `<article class="idea-turn ${turn.role === 'user' ? 'user' : 'agent'}"><span class="idea-turn-label">${turn.role === 'user' ? '我' : turn.kind === 'summary' ? 'Agent · 讨论总结' : 'Agent'}</span>${historyEscape(turn.content)}${turn.role === 'agent' ? ideaAssessmentMarkup(meta) : ''}</article>`;
@@ -633,11 +647,17 @@ function ideaDraftMarkup(item) {
   if (item.status === 'applied') return `<div class="idea-applied"><p>已写入 Wiki：<b>${esc(item.wiki_path || '')}</b></p><button class="btn btn-quiet btn-undo-idea" type="button" data-idea-id="${item.id}">撤销这次写入</button></div>`;
   if (item.status === 'kept_local') return `<div class="idea-applied"><p>草稿已保留在本地。之后仍可从这里复制或继续整理。</p></div>`;
   if (item.status === 'undone') return `<div class="idea-applied"><p>已撤销 Wiki 写入，原草稿仍保留在本地。</p></div>`;
+  const review = item.assessment?.review;
+  const reviewed = review && review.content === item.draft_content && review.verdict !== 'problematic';
+  const candidates = (item.evidence || []).filter(source => source.path);
+  const selected = review?.target_path || item.related_page_path || '';
   return `<section class="idea-draft-card"><h4>可审核的 Wiki 草稿</h4>
-    <label class="field-label">页面标题<input id="idea-draft-title" maxlength="120" value="${esc(item.draft_title || item.title)}"></label>
+    <label class="field-label">讨论标题（本地）<input id="idea-draft-title" maxlength="120" value="${esc(item.draft_title || item.title)}"></label>
     <label class="field-label">页面正文<textarea id="idea-draft-content" maxlength="5000">${esc(item.draft_content)}</textarea></label>
-    <p class="knowledge-safeguard">草稿不会自动写入。确认新建后会保存完整快照，之后可以安全撤销。</p>
-    <div class="idea-draft-actions"><button class="btn btn-quiet btn-keep-idea" type="button" data-idea-id="${item.id}">只保留在本地</button><button class="btn btn-primary btn-apply-idea" type="button" data-idea-id="${item.id}">确认新建 Wiki 页</button></div>
+    <label class="field-label">拟更新的学习页<select id="idea-review-target"><option value="">选择已有学习页</option>${candidates.map(source => `<option value="${esc(source.path)}" ${source.path === selected ? 'selected' : ''}>${esc(source.title || source.path)}</option>`).join('')}</select></label>
+    ${candidates.length ? '<p class="knowledge-safeguard">审核会将草稿和所选页面的少量原始资料摘录发送至工作台已配置的 AI 服务；本地模式只标记待验证。</p>' : '<p class="knowledge-safeguard">未找到关联学习页；此想法先保留在本地，不新建 Wiki 页。</p>'}
+    ${wikiReviewMarkup(review)}
+    <div class="idea-draft-actions"><button class="btn btn-quiet btn-keep-idea" type="button" data-idea-id="${item.id}">只保留在本地</button>${candidates.length ? `<button class="btn btn-quiet btn-review-idea" type="button" data-idea-id="${item.id}">审核草稿</button>` : ''}${reviewed ? `<button class="btn btn-primary btn-apply-idea" type="button" data-idea-id="${item.id}" data-mode="${review.kind === 'verified' ? 'append_current' : 'append_pending'}">${review.kind === 'verified' ? '确认写入学习页' : '确认为待验证问题'}</button>` : ''}</div>
   </section>`;
 }
 
@@ -745,14 +765,28 @@ async function generateIdeaDraft(button) {
   catch (e) { document.getElementById('ideas-hint').textContent = `暂时无法生成草稿：${e.message}`; button.disabled = false; button.textContent = '整理为 Wiki 草稿'; }
 }
 
+async function reviewIdeaDraft(button) {
+  const detail = button.closest('.idea-thread-card');
+  const content = detail.querySelector('#idea-draft-content')?.value.trim() || '';
+  const pagePath = detail.querySelector('#idea-review-target')?.value || '';
+  if (!pagePath) { document.getElementById('ideas-hint').textContent = '先选择已有的关联学习页。'; return; }
+  button.disabled = true; button.textContent = '正在审核…';
+  try {
+    const item = await api(`/api/ideas/${button.dataset.ideaId}/review`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content, page_path: pagePath }),
+    });
+    ideaSelectedId = item.id; await loadIdeaList();
+  } catch (e) { document.getElementById('ideas-hint').textContent = `草稿未能审核：${e.message}`; button.disabled = false; button.textContent = '审核草稿'; }
+}
+
 async function applyIdea(button, mode) {
   const detail = button.closest('.idea-thread-card');
   const id = button.dataset.ideaId;
   const title = detail.querySelector('#idea-draft-title')?.value.trim() || '';
   const content = detail.querySelector('#idea-draft-content')?.value.trim() || '';
   button.disabled = true; button.textContent = mode === 'keep_local' ? '正在保存…' : '正在写入…';
-  try { const item = await api(`/api/ideas/${id}/apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode, title, content }) }); ideaSelectedId = item.id; await loadIdeaList(); if (mode === 'create_idea') loadConcepts(); }
-  catch (e) { document.getElementById('ideas-hint').textContent = `未能处理草稿：${e.message}`; button.disabled = false; button.textContent = mode === 'keep_local' ? '只保留在本地' : '确认新建 Wiki 页'; }
+  try { const item = await api(`/api/ideas/${id}/apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode, title, content }) }); ideaSelectedId = item.id; await loadIdeaList(); if (mode !== 'keep_local') loadConcepts(); }
+  catch (e) { document.getElementById('ideas-hint').textContent = `未能处理草稿：${e.message}`; button.disabled = false; button.textContent = mode === 'keep_local' ? '只保留在本地' : '确认写回'; }
 }
 
 async function undoIdea(button) {
@@ -1329,6 +1363,8 @@ function knowledgeEvidenceMarkup(item) {
 
 function knowledgeDetailMarkup(item) {
   const analysis = item.analysis || {};
+  const review = analysis.review;
+  const reviewed = review && review.content === item.proposal && review.verdict !== 'problematic';
   const applied = item.status === 'applied';
   const canEdit = item.status === 'draft';
   return `<section class="knowledge-detail" data-knowledge-id="${item.id}" aria-labelledby="knowledge-detail-title">
@@ -1337,14 +1373,9 @@ function knowledgeDetailMarkup(item) {
     <section class="knowledge-analysis"><h4>Agent 分析 <small>${analysis.source === 'llm' ? '仅依据下方本地资料' : '本地整理，不核验事实'}</small></h4><p>${esc(analysis.summary || '已整理为待审核草案。')}</p><p class="knowledge-answer">${esc(analysis.answer || '')}</p>${analysis.open_questions?.length ? `<ul>${analysis.open_questions.map(question => `<li>${esc(question)}</li>`).join('')}</ul>` : ''}</section>
     <section class="knowledge-evidence"><h4>本地 Wiki 依据</h4>${knowledgeEvidenceMarkup(item)}</section>
     <section class="knowledge-proposal"><label for="knowledge-proposal-${item.id}">建议写入内容</label><textarea id="knowledge-proposal-${item.id}" maxlength="5000" ${canEdit ? '' : 'readonly'}>${esc(item.proposal)}</textarea></section>
-    ${canEdit ? `<fieldset class="knowledge-target"><legend>写入方式</legend>
-      <label><input type="radio" name="knowledge-target-${item.id}" value="append_current" checked> 追加到当前 Wiki 页</label>
-      <label><input type="radio" name="knowledge-target-${item.id}" value="create_idea"> 新建关联想法页</label>
-      <label><input type="radio" name="knowledge-target-${item.id}" value="keep_local"> 只保留在本地学习库</label>
-      <label class="knowledge-title-field" for="knowledge-title-${item.id}">新想法页标题<input id="knowledge-title-${item.id}" maxlength="120" value="${esc(item.proposed_title || '')}"></label>
-    </fieldset>
-    <div class="knowledge-safeguard">确认写入前会保存完整快照。写入后可撤销，若页面已被你手动修改则会停止自动回档。</div>
-    <div class="knowledge-actions"><button class="btn btn-primary btn-apply-knowledge" type="button">确认并处理草案</button></div>` : ''}
+    ${canEdit ? `<p class="knowledge-safeguard">最终审核会将草稿和当前学习页的少量原始资料摘录发送至工作台已配置的 AI 服务；本地模式只标记待验证。</p>
+    ${wikiReviewMarkup(review)}
+    <div class="knowledge-actions"><button class="btn btn-quiet btn-keep-knowledge" type="button">只保留在本地</button><button class="btn btn-quiet btn-review-knowledge" type="button">审核草稿</button>${reviewed ? `<button class="btn btn-primary btn-apply-knowledge" type="button" data-mode="${review.kind === 'verified' ? 'append_current' : 'append_pending'}">${review.kind === 'verified' ? '确认写入当前页' : '确认为待验证问题'}</button>` : ''}</div>` : ''}
     ${applied ? `<div class="knowledge-applied"><p>已写入 <b>${esc(item.target_path || item.page_path)}</b>。写入前快照仍可用于恢复。</p><button class="btn btn-quiet btn-undo-knowledge" type="button">撤销这次更新</button></div>` : ''}
   </section>`;
 }
@@ -1360,7 +1391,7 @@ async function renderKnowledgeUpdates() {
     const selected = updates.find(item => Number(item.id) === Number(knowledgeSelectedId)) || updates[0];
     if (selected) knowledgeSelectedId = selected.id;
     hint.textContent = updates.length
-      ? 'Agent 只检索本地 Wiki。草案不会自动写入，确认后会创建快照，可在页面未再次修改时撤销。'
+      ? '草稿需对照原始资料再次审核；只有确认后才会写回已有学习页。'
       : '从“学习笔记”中选择“交给 Agent 整理”，即可检索本地 Wiki 并生成第一份可审核草案。';
     content.innerHTML = `<div class="knowledge-workspace">
       <aside class="knowledge-timeline" aria-label="知识库草案列表">${updates.map(knowledgeItemMarkup).join('') || '<p class="knowledge-empty">还没有草案。</p>'}</aside>
@@ -1388,24 +1419,35 @@ async function createKnowledgeUpdate(content) {
   }
 }
 
-async function applyKnowledgeUpdate(detail) {
+async function reviewKnowledgeUpdate(detail) {
   const id = Number(detail.dataset.knowledgeId);
   const proposal = detail.querySelector('[id^="knowledge-proposal-"]').value.trim();
-  const target = detail.querySelector(`input[name="knowledge-target-${id}"]:checked`)?.value;
-  const title = detail.querySelector('[id^="knowledge-title-"]').value.trim();
-  const button = detail.querySelector('.btn-apply-knowledge');
+  const button = detail.querySelector('.btn-review-knowledge');
+  button.disabled = true; button.textContent = '正在审核…';
+  try {
+    await api(`/api/study/knowledge-updates/${id}/review`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ proposal }),
+    });
+    await renderKnowledgeUpdates();
+  } catch (e) { button.disabled = false; button.textContent = '审核草稿'; document.getElementById('history-hint').textContent = `草稿未能审核：${e.message}`; }
+}
+
+async function applyKnowledgeUpdate(detail, mode) {
+  const id = Number(detail.dataset.knowledgeId);
+  const proposal = detail.querySelector('[id^="knowledge-proposal-"]').value.trim();
+  const button = detail.querySelector(mode === 'keep_local' ? '.btn-keep-knowledge' : '.btn-apply-knowledge');
   button.disabled = true;
   button.textContent = '正在保存快照并处理…';
   try {
     await api(`/api/study/knowledge-updates/${id}/apply`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ target_mode: target, proposal, proposed_title: title }),
+      body: JSON.stringify({ target_mode: mode, proposal, proposed_title: '' }),
     });
     await renderKnowledgeUpdates();
-    if (target !== 'keep_local') loadConcepts();
+    if (mode !== 'keep_local') loadConcepts();
   } catch (e) {
     button.disabled = false;
-    button.textContent = '确认并处理草案';
+    button.textContent = mode === 'keep_local' ? '只保留在本地' : '确认写回';
     document.getElementById('history-hint').textContent = `未能处理草案：${e.message}`;
   }
 }
@@ -2866,9 +2908,13 @@ document.getElementById('ideas-modal').addEventListener('click', (e) => {
   if (e.target.closest('#btn-create-idea')) createIdea();
   if (e.target.closest('#btn-send-idea-message')) sendIdeaMessage(e.target.closest('#btn-send-idea-message'));
   if (e.target.closest('#btn-generate-idea-draft')) generateIdeaDraft(e.target.closest('#btn-generate-idea-draft'));
-  if (e.target.closest('.btn-apply-idea')) applyIdea(e.target.closest('.btn-apply-idea'), 'create_idea');
+  if (e.target.closest('.btn-review-idea')) reviewIdeaDraft(e.target.closest('.btn-review-idea'));
+  if (e.target.closest('.btn-apply-idea')) { const button = e.target.closest('.btn-apply-idea'); applyIdea(button, button.dataset.mode); }
   if (e.target.closest('.btn-keep-idea')) applyIdea(e.target.closest('.btn-keep-idea'), 'keep_local');
   if (e.target.closest('.btn-undo-idea')) undoIdea(e.target.closest('.btn-undo-idea'));
+});
+document.getElementById('ideas-modal').addEventListener('input', (e) => {
+  if (e.target.matches('#idea-draft-content, #idea-review-target')) e.target.closest('.idea-draft-card')?.querySelector('.btn-apply-idea')?.remove();
 });
 document.getElementById('btn-close-recall').addEventListener('click', closeRecall);
 document.getElementById('btn-recall-ready').addEventListener('click', beginRecall);
@@ -2950,13 +2996,18 @@ document.getElementById('history-content').addEventListener('click', (e) => {
   if (e.target.closest('#btn-summarize-reflections')) summarizeSelectedReflections();
   const knowledgeChoice = e.target.closest('.knowledge-update-select');
   if (knowledgeChoice) { knowledgeSelectedId = Number(knowledgeChoice.dataset.knowledgeId); renderKnowledgeUpdates(); }
-  if (e.target.closest('.btn-apply-knowledge')) applyKnowledgeUpdate(e.target.closest('.knowledge-detail'));
+  if (e.target.closest('.btn-review-knowledge')) reviewKnowledgeUpdate(e.target.closest('.knowledge-detail'));
+  if (e.target.closest('.btn-apply-knowledge')) { const button = e.target.closest('.btn-apply-knowledge'); applyKnowledgeUpdate(button.closest('.knowledge-detail'), button.dataset.mode); }
+  if (e.target.closest('.btn-keep-knowledge')) applyKnowledgeUpdate(e.target.closest('.knowledge-detail'), 'keep_local');
   if (e.target.closest('.btn-undo-knowledge')) undoKnowledgeUpdate(e.target.closest('.knowledge-detail'));
   const evidence = e.target.closest('.btn-open-evidence');
   if (evidence) { document.getElementById('history-modal').classList.add('hidden'); selectConcept(evidence.dataset.pagePath); }
 });
 document.getElementById('history-content').addEventListener('change', (e) => {
   if (e.target.matches('.reflection-select-input')) syncReflectionSelection();
+});
+document.getElementById('history-content').addEventListener('input', (e) => {
+  if (e.target.matches('[id^="knowledge-proposal-"]')) e.target.closest('.knowledge-detail')?.querySelector('.btn-apply-knowledge')?.remove();
 });
 document.getElementById('btn-export-data').addEventListener('click', async () => {
   const button = document.getElementById('btn-export-data');

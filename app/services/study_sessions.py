@@ -4,11 +4,11 @@
 """
 from __future__ import annotations
 
+import json
+import re
 from collections import Counter
 from datetime import date, datetime, timedelta
-import json
 from pathlib import Path
-import re
 
 from app import config, db
 from app.services import mastery, review_coach, review_schedule, tutor, wiki_reader, wiki_writer
@@ -746,11 +746,34 @@ def list_knowledge_updates(limit: int = 50, page_path: str | None = None) -> lis
     return [_knowledge_update_payload(row, revisions.get(row["id"])) for row in rows]
 
 
+def review_knowledge_update(update_id: int, proposal: str) -> dict:
+    row = _knowledge_update_row(update_id)
+    clean = proposal.strip()
+    if row["status"] != "draft" or not clean:
+        raise ValueError("只能审核尚未处理的非空草稿。")
+    raw = wiki_reader.raw_evidence_for_page(row["page_path"], clean)
+    verdict = tutor.review_wiki_proposal(content=clean, raw_evidence=raw)
+    kind = "verified" if verdict["verdict"] == "supported" else "tentative"
+    preview = None
+    if verdict["verdict"] != "problematic":
+        preview = wiki_writer.preview_reviewed_update(
+            row["page_path"], clean, update_id, kind=kind, citations=verdict["citations"],
+        )
+    analysis = _decode_json(row["analysis_json"], {})
+    analysis["review"] = {**verdict, "content": clean, "target_path": row["page_path"],
+                          "kind": kind if preview else None, "base_hash": preview["base_hash"] if preview else None,
+                          "diff": preview["diff"] if preview else "", "raw_evidence": raw}
+    with db.cursor() as cur:
+        cur.execute("UPDATE knowledge_updates SET proposal = ?, analysis_json = ?, updated_at = datetime('now', 'localtime') WHERE id = ?",
+                    (clean, json.dumps(analysis, ensure_ascii=False), update_id))
+    return get_knowledge_update(update_id)
+
+
 def apply_knowledge_update(
     update_id: int, *, target_mode: str, proposal: str, proposed_title: str = "",
 ) -> dict:
     """Apply an approved proposal with a full pre-write snapshot for later undo."""
-    if target_mode not in {"append_current", "create_idea", "keep_local"}:
+    if target_mode not in {"append_current", "append_pending", "keep_local"}:
         raise ValueError("不支持的知识库写入方式")
     clean_proposal = proposal.strip()
     if not clean_proposal:
@@ -767,15 +790,24 @@ def apply_knowledge_update(
                 (clean_proposal, title, target_mode, update_id),
             )
         return get_knowledge_update(update_id)
-    if target_mode == "append_current":
-        change = wiki_writer.append_learning_update(row["page_path"], clean_proposal, update_id)
-    else:
-        change = wiki_writer.create_linked_idea_page(row["page_path"], title, clean_proposal, update_id)
+    review = _decode_json(row["analysis_json"], {}).get("review") or {}
+    expected_mode = "append_current" if review.get("kind") == "verified" else "append_pending"
+    if (review.get("verdict") == "problematic" or review.get("content") != clean_proposal
+            or review.get("target_path") != row["page_path"] or target_mode != expected_mode
+            or not review.get("base_hash")):
+        raise ValueError("草稿尚未通过最终审核，或审核后被修改；请重新审核。")
+    if wiki_reader.raw_evidence_for_page(row["page_path"], clean_proposal) != review.get("raw_evidence"):
+        raise ValueError("原始资料已变化，请重新审核草稿。")
+    change = wiki_writer.apply_reviewed_update(
+        row["page_path"], clean_proposal, update_id, kind=review["kind"],
+        citations=review.get("citations", []), expected_hash=review["base_hash"],
+    )
     try:
         with db.cursor() as cur:
             cur.execute(
-                "INSERT INTO wiki_revisions (knowledge_update_id, page_path, before_content, after_content, created_page) VALUES (?, ?, ?, ?, ?)",
-                (update_id, change["path"], change["before_content"], change["after_content"], int(change["created_page"])),
+                "INSERT INTO wiki_revisions (knowledge_update_id, page_path, before_content, after_content, created_page, change_json) VALUES (?, ?, ?, ?, ?, ?)",
+                (update_id, change["path"], change["before_content"], change["after_content"],
+                 int(change["created_page"]), json.dumps(change["manifest"], ensure_ascii=False)),
             )
             revision_id = cur.lastrowid
             cur.execute(
@@ -793,7 +825,7 @@ def apply_knowledge_update(
         try:
             wiki_writer.restore_revision(
                 change["path"], change["before_content"], change["after_content"],
-                created_page=bool(change["created_page"]),
+                created_page=bool(change["created_page"]), manifest=change["manifest"],
             )
         except (FileNotFoundError, ValueError, OSError):
             pass
@@ -815,7 +847,7 @@ def undo_knowledge_update(update_id: int) -> dict:
         raise LookupError("没有可撤销的 Wiki 快照")
     wiki_writer.restore_revision(
         revision["page_path"], revision["before_content"], revision["after_content"],
-        created_page=bool(revision["created_page"]),
+        created_page=bool(revision["created_page"]), manifest=_decode_json(revision["change_json"], {}),
     )
     with db.cursor() as cur:
         cur.execute("UPDATE wiki_revisions SET undone_at = datetime('now', 'localtime') WHERE id = ?", (revision["id"],))

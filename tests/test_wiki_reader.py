@@ -54,6 +54,36 @@ class TestScanConcepts:
         }
 
 
+def test_raw_evidence_reads_inline_and_block_sources_without_leaving_raw(wiki):
+    inline = wiki_reader.raw_evidence_for_page("AI/rag/query-rewriting.md", "查询改写")
+    assert [item["path"] for item in inline] == ["raw/rag/xxx.md"]
+    assert "对象、场景和约束" in inline[0]["excerpt"]
+
+    page = wiki / "pages" / "AI" / "rag" / "query-rewriting.md"
+    page.write_text(page.read_text(encoding="utf-8").replace(
+        "sources: [raw/rag/xxx.md]", "sources:\n  - raw/rag/xxx.md\n  - ../outside.md",
+    ), encoding="utf-8")
+    block = wiki_reader.raw_evidence_for_page("AI/rag/query-rewriting.md", "查询改写")
+    assert [item["path"] for item in block] == ["raw/rag/xxx.md"]
+
+    page.write_text(page.read_text(encoding="utf-8").replace(
+        "  - ../outside.md", "other_field:\n  - raw/rag/unlisted.md",
+    ), encoding="utf-8")
+    (wiki / "raw" / "rag" / "unlisted.md").write_text("Not a declared source", encoding="utf-8")
+    assert [item["path"] for item in wiki_reader.raw_evidence_for_page("AI/rag/query-rewriting.md", "查询改写")] == ["raw/rag/xxx.md"]
+
+
+def test_final_review_rejects_personal_wiki_before_reading_sources(wiki, monkeypatch):
+    personal = wiki / "personal-wiki"
+    personal.mkdir()
+    monkeypatch.setenv("FEYNMAN_WIKI_PATH", str(personal))
+    try:
+        wiki_reader.raw_evidence_for_page("AI/rag/query-rewriting.md", "查询改写")
+        assert False, "个人知识空间不应参与最终审核"
+    except ValueError as error:
+        assert "learning-wiki" in str(error)
+
+
 class TestRenderPage:
     def test_render_html_with_wikilinks(self, wiki):
         meta, html = wiki_reader.render_page_html("AI/rag/query-rewriting.md")
