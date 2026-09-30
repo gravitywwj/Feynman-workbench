@@ -109,7 +109,7 @@ def test_reader_preferences_note_and_recall_flow(wiki):
 
         page.get_by_role("button", name="学习记录").click()
         assert page.get_by_role("tab", name="待处理盲区").get_attribute("aria-selected") == "true"
-        assert page.locator("#history-content").is_visible()
+        page.locator("#history-content").wait_for(state="visible")
 
         page.reload(wait_until="networkidle")
         assert page.locator("html").get_attribute("data-theme") == "dark"
