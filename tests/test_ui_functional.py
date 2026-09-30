@@ -74,7 +74,7 @@ def test_reader_preferences_note_and_recall_flow(wiki):
 
         page.get_by_role("button", name="开始回忆表达").click()
         page.get_by_role("button", name="开始表达这个问题").click()
-        page.locator("#recall-input").fill("查询改写会补充问题缺少的上下文和关键词，所以检索更容易命中真正需要的资料。例如把模糊问题补上对象、场景和约束条件。")
+        page.locator("#recall-input").fill("因为查询改写会补充问题缺少的上下文和关键词，所以检索更容易命中真正需要的资料。例如把模糊问题补上对象、场景和约束条件。")
         page.locator('input[name="recall-evidence-key"][value="mechanism"]').check()
         page.locator('input[name="recall-evidence-key"][value="example"]').check()
         page.get_by_role("button", name="保存并生成诊断").click()
@@ -193,7 +193,7 @@ def test_mobile_primary_action_is_not_clipped(wiki):
         page.get_by_role("button", name="开始回忆表达").wait_for(state="visible")
         page.get_by_role("button", name="切换知识点").click()
         assert "mobile-open" in (page.locator("#concept-panel").get_attribute("class") or "")
-        page.locator("#concept-drawer-backdrop").click(position={"x": 4, "y": 4})
+        page.locator("#concept-drawer-backdrop").click(position={"x": 380, "y": 4})
         assert "mobile-open" not in (page.locator("#concept-panel").get_attribute("class") or "")
         action = page.get_by_role("button", name="开始回忆表达")
         action_box = action.bounding_box()
