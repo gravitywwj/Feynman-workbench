@@ -78,6 +78,27 @@ def test_local_gap_revision_is_not_marked_verified(monkeypatch):
     assert (status, source) == ("revised", "local")
 
 
+def test_final_wiki_review_only_accepts_citations_from_supplied_raw(monkeypatch):
+    monkeypatch.setattr(tutor, "get_llm_config", lambda: {"mode": "ai", "api_key": "test-key"})
+    calls = []
+
+    def fake_call(_config, messages):
+        calls.append(messages)
+        return '{"verdict":"supported","feedback":"原文支持","citations":["raw/elsewhere.md"]}'
+
+    monkeypatch.setattr(tutor, "_call_llm", fake_call)
+    result = tutor.review_wiki_proposal(content="查询改写需要补足场景。", raw_evidence=[
+        {"path": "raw/rag/xxx.md", "excerpt": "查询改写需要补足场景。"},
+    ])
+    assert result["verdict"] == "uncertain"
+    assert result["citations"] == []
+    assert "查询改写需要补足场景。" in calls[0][1]["content"]
+
+    monkeypatch.setattr(tutor, "_call_llm", lambda *_: '{"verdict":"problematic","feedback":"有错","citations":[]}')
+    result = tutor.review_wiki_proposal(content="查询改写不需要场景。", raw_evidence=[])
+    assert result["verdict"] == "uncertain"
+
+
 def test_local_structure_prompt_accepts_explicit_function_calling_chain(monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     explanation = (

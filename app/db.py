@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS wiki_revisions (
     before_content TEXT NOT NULL,
     after_content TEXT NOT NULL,
     created_page INTEGER NOT NULL DEFAULT 0,
+    change_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
     undone_at TEXT
 );
@@ -128,6 +129,7 @@ CREATE TABLE IF NOT EXISTS idea_revisions (
     before_content TEXT NOT NULL,
     after_content TEXT NOT NULL,
     created_page INTEGER NOT NULL DEFAULT 1,
+    change_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
     undone_at TEXT
 );
@@ -268,6 +270,11 @@ def init_db() -> None:
         attempt_columns = {row["name"] for row in cur.execute("PRAGMA table_info(review_attempts)").fetchall()}
         if "evidence_level" not in attempt_columns:
             cur.execute("ALTER TABLE review_attempts ADD COLUMN evidence_level TEXT NOT NULL DEFAULT 'unverified'")
+
+        for table in ("wiki_revisions", "idea_revisions"):
+            columns = {row["name"] for row in cur.execute(f"PRAGMA table_info({table})").fetchall()}
+            if "change_json" not in columns:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN change_json TEXT NOT NULL DEFAULT '{{}}'")
 
 
 def rows_to_dicts(rows) -> list[dict]:

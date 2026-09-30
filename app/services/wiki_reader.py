@@ -171,6 +171,56 @@ def search_wiki(query: str, limit: int = 5) -> list[dict]:
     return [item for _, item in candidates[:max(1, min(limit, 10))]]
 
 
+def raw_evidence_for_page(page_path: str, query: str, limit: int = 3) -> list[dict]:
+    """Read bounded excerpts from a page's declared immutable raw sources."""
+    wiki = get_wiki_path().resolve()
+    if wiki.name == "personal-wiki" or ((wiki.parent / "SCHEMA.md").is_file() and wiki.name != "learning-wiki"):
+        raise ValueError("最终审核只能读取 learning-wiki，不能读取个人知识空间。")
+    candidate = Path(page_path)
+    if candidate.suffix != ".md" or candidate.is_absolute() or ".." in candidate.parts:
+        raise ValueError(f"非法页面路径: {page_path}")
+    page = (wiki / "pages" / candidate).resolve()
+    if not page.is_relative_to(wiki / "pages") or not page.is_file():
+        raise FileNotFoundError(page_path)
+    text = page.read_text(encoding="utf-8")
+    frontmatter = FRONTMATTER_RE.match(text)
+    if not frontmatter:
+        return []
+    field = re.search(r"(?m)^sources:[ \t]*(.*)$", frontmatter.group(1))
+    if not field:
+        return []
+    inline = field.group(1).strip()
+    if inline.startswith("["):
+        paths = [part.strip().strip("'\"") for part in inline.strip("[]").split(",")]
+    else:
+        paths = []
+        for line in frontmatter.group(1)[field.end():].lstrip("\r\n").splitlines():
+            item = re.match(r"^[ \t]+-[ \t]+(.+)$", line)
+            if not item:
+                break
+            paths.append(item.group(1).strip().strip("'\""))
+    raw_root = (wiki / "raw").resolve()
+    terms = _search_terms(query)
+    result = []
+    for path in paths:
+        if not path.startswith("raw/") or not path.endswith(".md"):
+            continue
+        source = (wiki / path).resolve()
+        if not source.is_relative_to(raw_root) or not source.is_file():
+            continue
+        with source.open("r", encoding="utf-8", errors="replace") as handle:
+            body = handle.read(150_000)
+        _, body = parse_frontmatter(body)
+        lowered = body.lower()
+        positions = [lowered.find(term) for term in terms if len(term) >= 2]
+        position = next((value for value in positions if value >= 0), 0)
+        start = max(0, position - 250)
+        result.append({"path": path, "excerpt": body[start:start + 2200].strip(), "kind": "raw"})
+        if len(result) >= limit:
+            break
+    return result
+
+
 SAFE_TAGS = {
     "a", "blockquote", "br", "code", "del", "em", "h1", "h2", "h3", "h4", "h5", "h6",
     "hr", "img", "li", "ol", "p", "pre", "span", "strong", "table", "tbody", "td", "th",

@@ -19,9 +19,14 @@ class IdeaMessage(BaseModel):
 
 
 class IdeaApply(BaseModel):
-    mode: str = Field(pattern="^(create_idea|keep_local)$")
+    mode: str = Field(pattern="^(append_current|append_pending|keep_local)$")
     title: str = Field(default="", max_length=120)
     content: str = Field(min_length=1, max_length=5000)
+
+
+class IdeaReview(BaseModel):
+    content: str = Field(min_length=1, max_length=5000)
+    page_path: str = Field(min_length=1, max_length=2000)
 
 
 @router.get("")
@@ -63,6 +68,16 @@ def generate_draft(idea_id: int) -> dict:
     try:
         return idea_sessions.generate_draft(idea_id)
     except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/{idea_id}/review")
+def review_idea(idea_id: int, payload: IdeaReview) -> dict:
+    try:
+        return idea_sessions.review_idea(idea_id, content=payload.content, page_path=payload.page_path)
+    except (ValueError, FileNotFoundError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
