@@ -1,7 +1,7 @@
-"""浏览器功能测试：验证学习流，不采集截图或做视觉断言。"""
+"""浏览器功能测试：验证学习流与应用自测状态。"""
 import time
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from threading import Thread
 
@@ -11,6 +11,7 @@ from playwright.sync_api import sync_playwright
 from uvicorn import Config, Server
 
 from app.main import app
+from app.services import practice_sessions
 
 
 @contextmanager
@@ -33,17 +34,24 @@ def run_server():
         thread.join(timeout=10)
 
 
+def launch_browser(playwright):
+    browser_paths = sorted((Path.home() / "AppData" / "Local" / "ms-playwright").glob("chromium-*/chrome-win64/chrome.exe"))
+    if browser_paths:
+        try:
+            return playwright.chromium.launch(executable_path=str(browser_paths[-1]))
+        except PlaywrightError:
+            pass
+    try:
+        return playwright.chromium.launch(channel="msedge")
+    except PlaywrightError as exc:
+        pytest.skip(f"Playwright Chromium and Microsoft Edge are unavailable: {exc}")
+
+
 @pytest.mark.ui
 def test_reader_preferences_note_and_recall_flow(wiki):
-    browser_paths = sorted((Path.home() / "AppData" / "Local" / "ms-playwright").glob("chromium-*/chrome-win64/chrome.exe"))
-    if not browser_paths:
-        pytest.skip("Playwright Chromium is not installed")
 
     with run_server() as base_url, sync_playwright() as playwright:
-        try:
-            browser = playwright.chromium.launch(executable_path=str(browser_paths[-1]))
-        except PlaywrightError as exc:
-            pytest.skip(f"Playwright Chromium could not launch: {exc}")
+        browser = launch_browser(playwright)
         page = browser.new_page()
         page.goto(base_url, wait_until="networkidle")
 
@@ -67,17 +75,23 @@ def test_reader_preferences_note_and_recall_flow(wiki):
 
         page.get_by_role("button", name="学习笔记").click()
         page.locator("#note-input").fill("浏览器流程保存的学习笔记。")
-        page.get_by_role("button", name="保存笔记").click()
+        with page.expect_response(lambda response: response.request.method == "PUT" and "/api/study/notes" in response.url) as note_response:
+            page.get_by_role("button", name="保存笔记").click()
+        assert note_response.value.status == 200, note_response.value.text()
         page.locator("#notes-status").wait_for(state="visible")
-        page.wait_for_function("document.querySelector('#notes-status').textContent.includes('已保存')")
+        page.wait_for_function("document.querySelector('#notes-status').textContent.includes('已保存')", timeout=5000)
+        assert "已保存" in page.locator("#notes-status").inner_text()
         page.get_by_role("button", name="关闭", exact=True).click()
 
         page.get_by_role("button", name="开始回忆表达").click()
         page.get_by_role("button", name="开始表达这个问题").click()
-        page.locator("#recall-input").fill("查询改写会补充问题缺少的上下文和关键词，所以检索更容易命中真正需要的资料。例如把模糊问题补上对象、场景和约束条件。")
+        page.locator("#recall-input").fill("查询改写是把问题缺少的上下文和关键词补完整。先补充对象、场景和约束条件，再把完整查询交给检索，所以更容易命中需要的资料。例如，把‘怎么安排’补成带有时间和目标的具体问题。")
         page.locator('input[name="recall-evidence-key"][value="mechanism"]').check()
         page.locator('input[name="recall-evidence-key"][value="example"]').check()
-        page.get_by_role("button", name="保存并生成诊断").click()
+        with page.expect_response(lambda response: response.url.endswith("/api/study/sessions")) as session_response:
+            page.get_by_role("button", name="保存并生成诊断").click()
+        assert session_response.value.status == 200, session_response.value.text()
+        page.wait_for_function("!document.querySelector('#recall-complete').classList.contains('hidden')")
         page.get_by_role("button", name="补充后，用更简单的话再讲一次").click()
         page.locator("#simplify-input").fill("查询改写是把问题补充完整，让检索系统找得更准。例如加上对象和场景。")
         page.get_by_role("button", name="保存第二次表达").click()
@@ -123,14 +137,11 @@ def test_reader_preferences_note_and_recall_flow(wiki):
 
 @pytest.mark.ui
 def test_note_can_be_reviewed_written_and_undone_through_knowledge_evolution(wiki):
-    browser_paths = sorted((Path.home() / "AppData" / "Local" / "ms-playwright").glob("chromium-*/chrome-win64/chrome.exe"))
-    if not browser_paths:
-        pytest.skip("Playwright Chromium is not installed")
 
     source = wiki / "pages" / "AI" / "rag" / "query-rewriting.md"
     before = source.read_text(encoding="utf-8")
     with run_server() as base_url, sync_playwright() as playwright:
-        browser = playwright.chromium.launch(executable_path=str(browser_paths[-1]))
+        browser = launch_browser(playwright)
         page = browser.new_page()
         page.goto(base_url, wait_until="networkidle")
         page.locator(".tree-dir", has_text="AI").click()
@@ -156,11 +167,8 @@ def test_note_can_be_reviewed_written_and_undone_through_knowledge_evolution(wik
 
 @pytest.mark.ui
 def test_workspace_exposes_switchable_local_api_profiles(wiki):
-    browser_paths = sorted((Path.home() / "AppData" / "Local" / "ms-playwright").glob("chromium-*/chrome-win64/chrome.exe"))
-    if not browser_paths:
-        pytest.skip("Playwright Chromium is not installed")
     with run_server() as base_url, sync_playwright() as playwright:
-        browser = playwright.chromium.launch(executable_path=str(browser_paths[-1]))
+        browser = launch_browser(playwright)
         page = browser.new_page()
         page.goto(base_url, wait_until="networkidle")
         page.get_by_role("button", name="设置").click()
@@ -177,11 +185,8 @@ def test_workspace_exposes_switchable_local_api_profiles(wiki):
 
 @pytest.mark.ui
 def test_mobile_primary_action_is_not_clipped(wiki):
-    browser_paths = sorted((Path.home() / "AppData" / "Local" / "ms-playwright").glob("chromium-*/chrome-win64/chrome.exe"))
-    if not browser_paths:
-        pytest.skip("Playwright Chromium is not installed")
     with run_server() as base_url, sync_playwright() as playwright:
-        browser = playwright.chromium.launch(executable_path=str(browser_paths[-1]))
+        browser = launch_browser(playwright)
         page = browser.new_page(viewport={"width": 390, "height": 844})
         page.goto(base_url, wait_until="networkidle")
         home_button = page.locator("#btn-home-action")
@@ -202,11 +207,8 @@ def test_mobile_primary_action_is_not_clipped(wiki):
 
 @pytest.mark.ui
 def test_home_workspace_panels_share_height_and_concept_switch_animates(wiki):
-    browser_paths = sorted((Path.home() / "AppData" / "Local" / "ms-playwright").glob("chromium-*/chrome-win64/chrome.exe"))
-    if not browser_paths:
-        pytest.skip("Playwright Chromium is not installed")
     with run_server() as base_url, sync_playwright() as playwright:
-        browser = playwright.chromium.launch(executable_path=str(browser_paths[-1]))
+        browser = launch_browser(playwright)
         page = browser.new_page()
         page.goto(base_url, wait_until="networkidle")
         heights = page.evaluate("""() => {
@@ -225,12 +227,9 @@ def test_home_workspace_panels_share_height_and_concept_switch_animates(wiki):
 
 @pytest.mark.ui
 def test_home_dashboard_surfaces_learning_records_and_keeps_actions_connected(wiki):
-    browser_paths = sorted((Path.home() / "AppData" / "Local" / "ms-playwright").glob("chromium-*/chrome-win64/chrome.exe"))
-    if not browser_paths:
-        pytest.skip("Playwright Chromium is not installed")
 
     with run_server() as base_url, sync_playwright() as playwright:
-        browser = playwright.chromium.launch(executable_path=str(browser_paths[-1]))
+        browser = launch_browser(playwright)
         page = browser.new_page()
         page.goto(base_url, wait_until="networkidle")
 
@@ -251,9 +250,6 @@ def test_home_dashboard_surfaces_learning_records_and_keeps_actions_connected(wi
 
 @pytest.mark.ui
 def test_home_update_reminder_and_library_time_status_filters_are_actionable(wiki):
-    browser_paths = sorted((Path.home() / "AppData" / "Local" / "ms-playwright").glob("chromium-*/chrome-win64/chrome.exe"))
-    if not browser_paths:
-        pytest.skip("Playwright Chromium is not installed")
 
     today = date.today().isoformat()
     pages = wiki / "pages" / "AI"
@@ -266,7 +262,7 @@ def test_home_update_reminder_and_library_time_status_filters_are_actionable(wik
         encoding="utf-8",
     )
     with run_server() as base_url, sync_playwright() as playwright:
-        browser = playwright.chromium.launch(executable_path=str(browser_paths[-1]))
+        browser = launch_browser(playwright)
         page = browser.new_page()
         page.goto(base_url, wait_until="networkidle")
 
@@ -294,15 +290,9 @@ def test_home_update_reminder_and_library_time_status_filters_are_actionable(wik
 
 @pytest.mark.ui
 def test_graph_node_drag_persists_and_can_be_cleared(wiki):
-    browser_paths = sorted((Path.home() / "AppData" / "Local" / "ms-playwright").glob("chromium-*/chrome-win64/chrome.exe"))
-    if not browser_paths:
-        pytest.skip("Playwright Chromium is not installed")
 
     with run_server() as base_url, sync_playwright() as playwright:
-        try:
-            browser = playwright.chromium.launch(executable_path=str(browser_paths[-1]))
-        except PlaywrightError as exc:
-            pytest.skip(f"Playwright Chromium could not launch: {exc}")
+        browser = launch_browser(playwright)
         page = browser.new_page()
         page.goto(base_url, wait_until="networkidle")
         page.get_by_role("button", name="知识图谱").click()
@@ -355,11 +345,8 @@ def test_graph_node_drag_persists_and_can_be_cleared(wiki):
 
 @pytest.mark.ui
 def test_first_run_demo_workspace_and_graph_list_are_actionable(wiki):
-    browser_paths = sorted((Path.home() / "AppData" / "Local" / "ms-playwright").glob("chromium-*/chrome-win64/chrome.exe"))
-    if not browser_paths:
-        pytest.skip("Playwright Chromium is not installed")
     with run_server() as base_url, sync_playwright() as playwright:
-        browser = playwright.chromium.launch(executable_path=str(browser_paths[-1]))
+        browser = launch_browser(playwright)
         page = browser.new_page()
         page.goto(base_url, wait_until="networkidle")
         page.get_by_role("button", name="设置").click()
@@ -371,4 +358,165 @@ def test_first_run_demo_workspace_and_graph_list_are_actionable(wiki):
         assert "尚未留下" not in choice.inner_text()
         choice.click()
         assert page.get_by_role("button", name="开始回忆表达").is_enabled()
+        browser.close()
+
+
+@pytest.mark.ui
+def test_application_practice_flow_and_visual_evidence(wiki, monkeypatch):
+    pages = wiki / "pages" / "AI" / "foundation"
+    pages.mkdir(parents=True, exist_ok=True)
+    for name in ("evaluation-basics", "ai-practice-lab", "python-api-basics"):
+        (pages / f"{name}.md").write_text(
+            f"---\ntitle: {name}\ntype: concept\n---\n\n# {name}\n", encoding="utf-8",
+        )
+    tz = datetime.now().astimezone().tzinfo
+    clock = {"now": datetime(2026, 10, 12, 10, 0, tzinfo=tz)}
+    monkeypatch.setattr(practice_sessions, "_now", lambda: clock["now"])
+    metrics = next(task for task in practice_sessions.TASKS if task["task_key"] == "metrics-apply")["expected"]
+    validation = next(task for task in practice_sessions.TASKS if task["task_key"] == "validation-apply")["expected"]
+    wrong_metrics = dict(metrics, tp=0)
+    screenshots = Path(__file__).resolve().parents[1] / "audit" / "learning-validation-2026-10-12" / "screenshots"
+    screenshots.mkdir(parents=True, exist_ok=True)
+
+    with run_server() as base_url, sync_playwright() as playwright:
+        browser = launch_browser(playwright)
+        page = browser.new_page(viewport={"width": 1440, "height": 1000})
+        page.set_default_timeout(10000)
+        page.goto(base_url, wait_until="networkidle")
+        page.locator(".tree-dir", has_text="AI").click()
+        page.locator(".tree-dir", has_text="foundation").click()
+        page.locator("#concept-tree").get_by_text("ai-practice-lab", exact=True).click()
+        page.wait_for_function("document.querySelector('#page-title')?.textContent === 'ai-practice-lab'")
+        page.locator("#btn-open-practice").click()
+        panel = page.locator("#practice-panel")
+        panel.wait_for(state="visible")
+        page.locator("#btn-open-practice").focus()
+        page.keyboard.press("Space")
+        panel.wait_for(state="hidden")
+        page.keyboard.press("Space")
+        panel.wait_for(state="visible")
+        page.wait_for_function("document.querySelector('.practice-task-availability')?.textContent.includes('独立应用验收')")
+        page.screenshot(path=str(screenshots / "01-preconditions.png"), full_page=True)
+
+        page.locator("#practice-task").select_option("metrics-apply")
+        page.locator("#practice-start-form button[type=submit]").click()
+        form = page.locator("#practice-submit-form")
+        form.wait_for(state="visible")
+        for key, value in wrong_metrics.items():
+            form.locator(f'[data-answer-field="{key}"]').fill(str(value))
+        page.route(
+            "**/api/practice/attempts/*/submit",
+            lambda route: route.fulfill(status=503, content_type="application/json", body='{"detail":"mock save failure"}'),
+        )
+        with page.expect_response(lambda response: response.url.endswith("/submit")) as failed_response:
+            form.locator('button[type="submit"]').click()
+        assert failed_response.value.status == 503
+        page.wait_for_function("document.querySelector('#practice-status')?.textContent.includes('mock save failure')")
+        assert form.locator('[data-answer-field="tp"]').input_value() == "0"
+        page.screenshot(path=str(screenshots / "02-save-error-preserves-answer.png"), full_page=True)
+        page.unroute("**/api/practice/attempts/*/submit")
+        form.locator('button[type="submit"]').click()
+        page.locator(".practice-result").wait_for(state="visible")
+        assert "需复查" in page.locator(".practice-result").inner_text()
+        page.screenshot(path=str(screenshots / "03-failed-correction.png"), full_page=True)
+
+        page.locator('[data-practice-action="list"]').click()
+        page.locator("#practice-task").select_option("validation-apply")
+        page.locator('#practice-start-form select[name="mode"]').select_option("practice")
+        page.locator("#practice-start-form button[type=submit]").click()
+        page.locator('[data-practice-action="solution"]').click()
+        page.locator(".practice-solution").wait_for(state="visible")
+        help_select = page.locator('#practice-submit-form select[name="assistance"]')
+        assert help_select.input_value() == "solution" and help_select.is_disabled()
+        assert "本次将作为练习记录" in page.locator(".practice-attempt").inner_text()
+        page.screenshot(path=str(screenshots / "04-solution-viewed.png"), full_page=True)
+        for key, value in validation.items():
+            field = page.locator(f'[data-answer-field="{key}"]')
+            if field.evaluate("node => node.tagName") == "SELECT":
+                field.select_option(str(value).lower() if isinstance(value, bool) else value)
+            else:
+                field.fill(str(value))
+        page.locator('#practice-submit-form button[type="submit"]').click()
+        page.locator(".practice-result").wait_for(state="visible")
+        assert "solution" in page.locator(".practice-result").inner_text()
+
+        page.locator("#concept-tree").get_by_text("evaluation-basics", exact=True).click()
+        page.wait_for_function("document.querySelector('#practice-task')?.querySelector('option[value=\\\"metrics-apply\\\"]')")
+        page.locator("#practice-task").select_option("metrics-apply")
+        page.locator("#practice-start-form button[type=submit]").click()
+        for key, value in metrics.items():
+            page.locator(f'[data-answer-field="{key}"]').fill(str(value))
+        page.locator('#practice-submit-form button[type="submit"]').click()
+        page.locator(".practice-result").wait_for(state="visible")
+        assert "符合本题的首次独立验收条件" in page.locator(".practice-result").inner_text()
+        page.screenshot(path=str(screenshots / "05-independent-pass.png"), full_page=True)
+
+        page.reload(wait_until="networkidle")
+        page.locator(".tree-dir", has_text="AI").click()
+        page.locator(".tree-dir", has_text="foundation").click()
+        page.locator("#concept-tree").get_by_text("evaluation-basics", exact=True).click()
+        page.wait_for_function("document.querySelector('#page-title')?.textContent === 'evaluation-basics'")
+        page.locator("#btn-open-practice").click()
+        page.wait_for_function("document.querySelectorAll('.practice-evidence-card')[1]?.textContent.includes('1 次匹配')")
+        assert page.locator(".practice-history-item").filter(has_text="结果匹配").count() == 1
+
+        page.locator("#btn-close-practice").click()
+        clock["now"] += timedelta(days=6)
+        page.locator("#btn-open-practice").click()
+        page.wait_for_function("document.querySelector('.practice-task-availability')?.textContent.includes('2026-10-19')")
+        page.screenshot(path=str(screenshots / "06-delayed-locked.png"), full_page=True)
+        page.locator("#btn-close-practice").click()
+        clock["now"] += timedelta(days=1)
+        page.locator("#btn-open-practice").click()
+        page.wait_for_function("document.querySelector('.practice-task-availability')?.textContent.includes('已到七日间隔复测日期')")
+        page.locator("#practice-task").select_option("metrics-delayed")
+        page.screenshot(path=str(screenshots / "07-delayed-open.png"), full_page=True)
+
+        page.locator('[data-practice-view="external"]').click()
+        external = page.locator("#practice-external-form")
+        external.locator('[name="title"]').fill("<script>alert(1)</script>")
+        external.locator('[name="source_url"]').fill("https://example.com/task")
+        external.locator('[name="reported_result"]').fill("平台显示通过；用户自报，未自动核验")
+        external.locator('[name="artifact_text"]').fill("<img src=x onerror=alert(1)>")
+        external.locator('[name="familiarity"]').select_option("unseen")
+        external.locator('[name="assistance"]').select_option("none")
+        external.locator('button[type="submit"]').click()
+        external_history = page.locator(".practice-history-item").filter(has_text="用户自报，未自动核验")
+        external_history.wait_for(state="visible")
+        assert external_history.count() == 1
+        assert page.locator("img[onerror]").count() == 0
+        source_link = page.get_by_role("link", name="打开练习链接")
+        assert source_link.get_attribute("rel") == "noopener noreferrer"
+        page.screenshot(path=str(screenshots / "08-external-self-report.png"), full_page=True)
+        page.context.route(
+            "https://example.com/task",
+            lambda route: route.fulfill(status=200, content_type="text/html", body="<title>mock target</title>"),
+        )
+        with page.expect_popup() as popup_info:
+            source_link.click()
+        popup = popup_info.value
+        popup.wait_for_load_state("load")
+        assert popup.url == "https://example.com/task"
+        popup.close()
+
+        page.set_viewport_size({"width": 390, "height": 844})
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        assert not page.locator(".concept-panel").evaluate("el => el.classList.contains('mobile-open')")
+        page.wait_for_function("document.querySelector('#concept-panel').getBoundingClientRect().right <= 0")
+        page.locator("#practice-panel").scroll_into_view_if_needed()
+        page.screenshot(path=str(screenshots / "09-mobile-390px.png"))
+
+        page.set_viewport_size({"width": 1440, "height": 1000})
+        page.locator("#btn-close-practice").click()
+        page.locator(".tree-dir", has_text="Financing").click()
+        page.locator(".tree-dir", has_text="cashflow").click()
+        page.locator("#concept-tree").get_by_text("预算与储蓄", exact=True).click()
+        page.wait_for_function("document.querySelector('#page-title')?.textContent === '预算与储蓄'")
+        page.locator("#btn-open-practice").click()
+        page.locator('[data-practice-view="local"]').click()
+        page.wait_for_function("document.querySelector('.practice-empty')?.textContent.includes('没有适配的本地自测题')")
+        assert not page.locator("#practice-task").count()
+        page.screenshot(path=str(screenshots / "10-no-adapted-local-task.png"), full_page=True)
+        page.locator('[data-practice-view="external"]').click()
+        assert page.get_by_role("button", name="保存自报记录").is_visible()
         browser.close()

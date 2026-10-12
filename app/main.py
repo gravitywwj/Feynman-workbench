@@ -6,13 +6,14 @@ from fastapi.staticfiles import StaticFiles
 
 from app import db
 from app.config import STATIC_DIR
-from app.routers import concepts, ideas, study
+from app.routers import concepts, ideas, practice, study
 
 app = FastAPI(title="费曼学习工作台", version="0.1.0")
 
 app.include_router(concepts.router)
 app.include_router(study.router)
 app.include_router(ideas.router)
+app.include_router(practice.router)
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 

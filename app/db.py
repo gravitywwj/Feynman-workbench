@@ -168,6 +168,31 @@ CREATE TABLE IF NOT EXISTS review_attempts (
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
+CREATE TABLE IF NOT EXISTS practice_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    attempt_uid TEXT NOT NULL UNIQUE,
+    page_path TEXT NOT NULL,
+    page_title TEXT NOT NULL,
+    task_key TEXT NOT NULL DEFAULT '',
+    task_version INTEGER NOT NULL DEFAULT 1,
+    task_snapshot_json TEXT NOT NULL DEFAULT '{}',
+    kind TEXT NOT NULL,                 -- builtin | external
+    mode TEXT NOT NULL,                 -- practice | assessment
+    phase TEXT NOT NULL,                -- application | transfer | delayed
+    familiarity TEXT NOT NULL DEFAULT 'unknown',
+    seen_before INTEGER NOT NULL DEFAULT 0,
+    assistance TEXT NOT NULL DEFAULT 'unknown',
+    answer_json TEXT NOT NULL DEFAULT '{}',
+    result_json TEXT NOT NULL DEFAULT '{}',
+    artifact_text TEXT NOT NULL DEFAULT '',
+    source_url TEXT NOT NULL DEFAULT '',
+    check_kind TEXT NOT NULL DEFAULT 'unverified',
+    precursor_uid TEXT,
+    created_at TEXT NOT NULL,
+    submitted_at TEXT,
+    solution_viewed_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS learning_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_type TEXT NOT NULL,
@@ -201,6 +226,8 @@ CREATE INDEX IF NOT EXISTS idx_self_assessments_updated ON self_assessments(upda
 CREATE INDEX IF NOT EXISTS idx_cards_due ON cards(due);
 CREATE INDEX IF NOT EXISTS idx_cards_session ON cards(session_id);
 CREATE INDEX IF NOT EXISTS idx_review_attempts_card ON review_attempts(card_id);
+CREATE INDEX IF NOT EXISTS idx_practice_attempts_page ON practice_attempts(page_path, submitted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_practice_attempts_task ON practice_attempts(page_path, task_key, created_at);
 CREATE INDEX IF NOT EXISTS idx_learning_events_created ON learning_events(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_diagnosis_feedback_session ON diagnosis_feedback(session_id);
 """

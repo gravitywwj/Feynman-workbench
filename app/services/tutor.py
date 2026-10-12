@@ -6,7 +6,6 @@ import re
 
 from app.config import get_llm_config
 
-
 PERSONAS = {
     "feynman": {
         "label": "费曼教练",
@@ -773,19 +772,25 @@ def summarize_reflections(reflections: list[dict]) -> tuple[str, str]:
     return result[:3000], "local"
 
 
-def assess_gap_revision(revision: str, gap_content: str, title: str, reference_html: str) -> tuple[str, str, str]:
+def assess_gap_revision(
+    revision: str, gap_content: str, title: str, reference_html: str, retest_prompt: str = "",
+) -> tuple[str, str, str]:
     """核对用户对单个盲区的补充。离线模式只记录为已补充，避免伪造“已验证”。"""
+    if not reference_html.strip():
+        return "revised", "补充已保存；当前没有可用参考资料，未进行事实核对。", "local"
     config = get_llm_config()
     if config.get("mode") != "ai" or not config["api_key"]:
         return "revised", "补充已保存。配置学习助手后，可依据参考资料进一步核对是否已澄清。", "local"
     try:
         content = _call_llm(config, [
             {"role": "system", "content": "你是费曼学习教练。只依据参考资料核对学习者对一个盲区的补充。返回纯 JSON：{\"status\":\"verified|revised\",\"feedback\":\"简短中文反馈\"}。只有补充准确且真正回应盲区时才用 verified。"},
-            {"role": "user", "content": f"知识点：{title}\n\n参考资料：\n{reference_html[:12000]}\n\n原盲区：{gap_content}\n\n学习者补充：{revision[:10000]}"},
+            {"role": "user", "content": f"知识点：{title}\n\n复测任务：{retest_prompt or '请在不同情境中应用这一判断。'}\n\n参考资料：\n{reference_html[:12000]}\n\n原盲区：{gap_content}\n\n学习者补充：{revision[:10000]}"},
         ])
         payload = _clean_json(content)
-        status = str(payload.get("status", "revised")).strip()
-        feedback = str(payload.get("feedback", "补充已保存，建议在下一次回顾中再次验证。")).strip()[:500]
+        if payload.get("status") not in {"verified", "revised"} or not str(payload.get("feedback") or "").strip():
+            raise ValueError("学习助手反馈不完整")
+        status = str(payload["status"]).strip()
+        feedback = str(payload["feedback"]).strip()[:500]
         if status not in {"verified", "revised"}:
             status = "revised"
         return status, feedback or "补充已保存，建议在下一次回顾中再次验证。", "llm"

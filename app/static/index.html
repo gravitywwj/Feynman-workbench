@@ -13,7 +13,7 @@
     <img class="brand-mark" src="/static/assets/quill.png" alt="">
     <div class="brand-text">
       <h1>费曼学习工作台</h1>
-      <p>讲得清，才算真学会</p>
+      <p>讲清概念，用任务核对理解</p>
     </div>
   </div>
 
@@ -114,6 +114,7 @@
         </div>
         <div class="page-title-actions">
           <button id="btn-open-notes" class="btn btn-quiet">学习笔记</button>
+          <button id="btn-open-practice" class="btn btn-quiet" type="button" aria-expanded="false" aria-controls="practice-panel">应用自测</button>
           <button id="btn-start" class="btn btn-primary">开始回忆表达</button>
         </div>
       </div>
@@ -191,6 +192,21 @@
           <p>先从记忆中重建你的理解，再回头核对遗漏。这比边看边抄更能暴露真正的掌握程度。</p>
         </div>
         <button id="btn-start-inline" class="btn btn-primary">进入回忆表达</button>
+      </section>
+
+      <section id="practice-panel" class="practice-panel hidden" aria-labelledby="practice-title">
+        <div class="practice-panel-head">
+          <div><p class="eyebrow">独立应用与外部练习</p><h3 id="practice-title">应用自测</h3></div>
+          <button id="btn-close-practice" class="text-btn" type="button">收起</button>
+        </div>
+        <p class="practice-boundary">本地题按固定标准核对计算与规则应用，不执行代码。外部平台结果由你填写，用户自报，未自动核验。</p>
+        <div id="practice-evidence" class="practice-evidence" aria-label="四项学习证据"></div>
+        <div class="practice-tabs" role="tablist" aria-label="选择练习方式">
+          <button class="practice-tab active" type="button" data-practice-view="local" role="tab" aria-selected="true">本地自测</button>
+          <button class="practice-tab" type="button" data-practice-view="external" role="tab" aria-selected="false">记录外部练习</button>
+        </div>
+        <p id="practice-status" class="practice-status" role="status" aria-live="polite"></p>
+        <div id="practice-content"></div>
       </section>
     </div>
   </section>

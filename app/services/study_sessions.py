@@ -4,14 +4,14 @@
 """
 from __future__ import annotations
 
+import json
+import re
 from collections import Counter
 from datetime import date, datetime, timedelta
-import json
 from pathlib import Path
-import re
 
 from app import config, db
-from app.services import mastery, review_coach, review_schedule, tutor, wiki_reader, wiki_writer
+from app.services import mastery, practice_sessions, review_coach, review_schedule, tutor, wiki_reader, wiki_writer
 
 MIN_REVIEW_ANSWER_LENGTH = 24
 MIN_GAP_REVISION_LENGTH = 24
@@ -1023,7 +1023,9 @@ def retest_gap(gap_id: int, answer: str) -> dict:
         _, reference_html = wiki_reader.render_page_html(gap["page_path"])
     except (FileNotFoundError, ValueError):
         reference_html = ""
-    status, feedback, source = tutor.assess_gap_revision(answer, gap["content"], gap["page_title"], reference_html)
+    status, feedback, source = tutor.assess_gap_revision(
+        answer, gap["content"], gap["page_title"], reference_html, gap.get("retest_prompt") or "",
+    )
     with db.cursor() as cur:
         cur.execute(
             "UPDATE gaps SET retest_answer = ?, retest_completed_at = datetime('now', 'localtime'), status = ? WHERE id = ?",
@@ -1070,14 +1072,14 @@ def export_learning_data() -> dict:
     tables = (
         "notes", "reflections", "sessions", "turns", "gaps", "cards", "reviews",
         "review_attempts", "learning_events", "diagnosis_feedback", "knowledge_updates", "self_assessments",
-        "wiki_revisions",
+        "wiki_revisions", "practice_attempts",
     )
     with db.cursor() as cur:
         payload = {
             table: db.rows_to_dicts(cur.execute(f"SELECT * FROM {table} ORDER BY {'page_path' if table == 'self_assessments' else 'id'}").fetchall())
             for table in tables
         }
-    return {"format": "feynman-workbench-export", "version": 5, "exported_at": datetime.now().isoformat(timespec="seconds"), **payload}
+    return {"format": "feynman-workbench-export", "version": 6, "exported_at": datetime.now().isoformat(timespec="seconds"), **payload}
 
 
 def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
@@ -1089,12 +1091,12 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
     """
     if payload.get("format") != "feynman-workbench-export":
         raise ValueError("这不是费曼学习工作台导出的学习数据")
-    if payload.get("version") not in {1, 2, 3, 4, 5}:
+    if payload.get("version") not in {1, 2, 3, 4, 5, 6}:
         raise ValueError("暂不支持该导出版本")
     names = (
         "notes", "reflections", "sessions", "turns", "gaps", "cards", "reviews",
         "review_attempts", "learning_events", "diagnosis_feedback", "knowledge_updates", "self_assessments",
-        "wiki_revisions",
+        "wiki_revisions", "practice_attempts",
     )
     source = {name: payload.get(name, []) for name in names}
     if any(not isinstance(value, list) for value in source.values()):
@@ -1102,11 +1104,15 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
     counts = {
         "notes": 0, "reflections": 0, "sessions": 0, "cards": 0, "events": 0,
         "knowledge_updates": 0, "wiki_revisions": 0, "self_assessments": 0,
+        "practice_attempts": 0,
     }
+    with db.cursor() as cur:
+        practice_preview = practice_sessions.import_preview(cur, source["practice_attempts"])
     if dry_run:
         return {
             "dry_run": True,
             "incoming": {name: len(value) for name, value in source.items()},
+            "practice": practice_preview,
             "message": "导入只会补充不存在的会话，并在导入笔记更新更晚时合并笔记。",
         }
     with db.cursor() as cur:
@@ -1226,6 +1232,8 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
             path = str(event.get("page_path", ""))
             if path:
                 event_type = str(event.get("event_type") or "imported")
+                if event_type == "practice_submitted":
+                    continue
                 created_at = str(event.get("created_at") or "")
                 existing = cur.execute(
                     "SELECT 1 FROM learning_events WHERE event_type = ? AND page_path = ? AND created_at = ?",
@@ -1320,6 +1328,9 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
                  created_at or datetime.now().isoformat(timespec="seconds"), revision.get("undone_at")),
             )
             counts["wiki_revisions"] += 1
+        imported_practice = practice_sessions.import_attempts(cur, source["practice_attempts"])
+        counts["practice_attempts"] = imported_practice["attempts"]
+        counts["events"] += imported_practice["events"]
     return {"dry_run": False, "imported": counts, "message": "已合并导入数据，当前设备既有记录未被删除。"}
 
 
@@ -1344,9 +1355,17 @@ def weekly_report(today: date | None = None) -> dict:
             "FROM review_attempts JOIN cards ON cards.id = review_attempts.card_id "
             "JOIN sessions ON sessions.id = cards.session_id "
             "WHERE review_attempts.verdict = 'pass' "
-            "AND review_attempts.evidence_level IN ('source_standard', 'source_reviewed') "
+            "AND review_attempts.source = 'llm' AND review_attempts.evidence_level = 'source_reviewed' "
             "AND substr(review_attempts.created_at, 1, 10) BETWEEN ? AND ? "
             "GROUP BY sessions.page_path",
+            (start, end),
+        ).fetchall()
+        historical_keyword_matches = cur.execute(
+            "SELECT COUNT(*) FROM review_attempts WHERE evidence_level = 'source_standard'"
+        ).fetchone()[0]
+        practice_rows = cur.execute(
+            "SELECT kind, mode, phase, task_key, result_json FROM practice_attempts "
+            "WHERE submitted_at IS NOT NULL AND substr(submitted_at, 1, 10) BETWEEN ? AND ?",
             (start, end),
         ).fetchall()
     counter = Counter()
@@ -1384,6 +1403,39 @@ def weekly_report(today: date | None = None) -> dict:
     ]
     prior_gap_counts = Counter(gap["page_path"] for gap in gap_rows)
     source_checks = {row["page_path"]: dict(row) for row in source_check_rows}
+    practice_summary = {
+        phase: {"assessments": 0, "matches": 0, "needs_review": 0, "practice_runs": 0}
+        for phase in ("application", "transfer", "delayed")
+    }
+    practice_summary["external"] = {"self_reported": 0}
+    practice_summary["by_family"] = {
+        family: {
+            phase: {"assessments": 0, "matches": 0, "needs_review": 0, "practice_runs": 0}
+            for phase in practice_sessions.PHASES
+        }
+        for family in sorted({task["family"] for task in practice_sessions.TASKS})
+    }
+    for row in practice_rows:
+        result = _decode_json(row["result_json"], {})
+        if row["kind"] == "external":
+            practice_summary["external"]["self_reported"] += 1
+        elif row["phase"] in practice_sessions.PHASES:
+            family = practice_sessions._TASKS_BY_KEY.get(row["task_key"], {}).get("family", "unknown")
+            family_summary = practice_summary["by_family"].setdefault(
+                family, {
+                    phase: {"assessments": 0, "matches": 0, "needs_review": 0, "practice_runs": 0}
+                    for phase in practice_sessions.PHASES
+                },
+            )
+            for phase_summary in (practice_summary[row["phase"]], family_summary[row["phase"]]):
+                if row["mode"] == "assessment":
+                    phase_summary["assessments"] += 1
+                    if result.get("eligible") and result.get("matches") is True:
+                        phase_summary["matches"] += 1
+                    elif result.get("eligible"):
+                        phase_summary["needs_review"] += 1
+                else:
+                    phase_summary["practice_runs"] += 1
     progress_evidence = []
     for concept in concepts:
         state = states[concept["path"]]
@@ -1403,7 +1455,7 @@ def weekly_report(today: date | None = None) -> dict:
     ]
     evidence_total = (
         counter["session_done"] + counter["gap_revised"] + counter["gap_practiced"]
-        + counter["gap_retested"] + counter["review_rated"]
+        + counter["gap_retested"] + counter["review_rated"] + counter["practice_submitted"]
     )
     return {
         "range": {"start": start, "end": end},
@@ -1414,7 +1466,19 @@ def weekly_report(today: date | None = None) -> dict:
             "revised_gaps": counter["gap_revised"] + counter["gap_practiced"],
             "reviews": counter["review_rated"],
             "maintaining_concepts": len(maintaining),
+            "historical_keyword_matches": int(historical_keyword_matches),
+            "source_checks": sum(int(row["total"]) for row in source_check_rows),
+            "practice_attempts": sum(
+                practice_summary[phase]["assessments"] + practice_summary[phase]["practice_runs"]
+                for phase in practice_sessions.PHASES
+            ),
+            "external_practice": practice_summary["external"]["self_reported"],
         },
+        "practice": practice_summary,
+        "history_notice": (
+            "历史关键词匹配记录，未完成事实核验；这些记录不计入来源核对，旧掌握状态可能回退。"
+            if historical_keyword_matches else ""
+        ),
         "corrected_misconceptions": corrections,
         "repeated_gaps": [item for item in corrections if item["times"] > 1],
         "maintaining_concepts": [{"title": item["title"], "path": item["path"]} for item in maintaining[:8]],
@@ -1440,6 +1504,7 @@ def list_orphaned_records() -> list[dict]:
             "UNION ALL SELECT page_path, page_title, updated_at AS last_activity FROM knowledge_updates "
             "UNION ALL SELECT target_path, page_title, updated_at AS last_activity FROM knowledge_updates WHERE target_path IS NOT NULL"
             " UNION ALL SELECT page_path, page_path AS page_title, updated_at AS last_activity FROM self_assessments"
+            " UNION ALL SELECT page_path, page_title, COALESCE(submitted_at, created_at) AS last_activity FROM practice_attempts"
             ") GROUP BY page_path"
         ).fetchall()
     orphaned = []
@@ -1463,8 +1528,8 @@ def relink_page(old_path: str, new_path: str) -> dict:
             "SELECT EXISTS(SELECT 1 FROM sessions WHERE page_path = ?) OR EXISTS(SELECT 1 FROM notes WHERE page_path = ?) "
             "OR EXISTS(SELECT 1 FROM reflections WHERE page_path = ?) OR EXISTS(SELECT 1 FROM knowledge_updates WHERE page_path = ?) "
             "OR EXISTS(SELECT 1 FROM knowledge_updates WHERE target_path = ?) OR EXISTS(SELECT 1 FROM wiki_revisions WHERE page_path = ?) "
-            "OR EXISTS(SELECT 1 FROM self_assessments WHERE page_path = ?)",
-            (old_path, old_path, old_path, old_path, old_path, old_path, old_path),
+            "OR EXISTS(SELECT 1 FROM self_assessments WHERE page_path = ?) OR EXISTS(SELECT 1 FROM practice_attempts WHERE page_path = ?)",
+            (old_path, old_path, old_path, old_path, old_path, old_path, old_path, old_path),
         ).fetchone()[0]
         if not has_records:
             raise LookupError("旧页面没有可重新关联的学习记录。")
@@ -1479,4 +1544,9 @@ def relink_page(old_path: str, new_path: str) -> dict:
         cur.execute("UPDATE knowledge_updates SET target_path = ? WHERE target_path = ?", (new_path, old_path))
         cur.execute("UPDATE wiki_revisions SET page_path = ? WHERE page_path = ?", (new_path, old_path))
         cur.execute("UPDATE self_assessments SET page_path = ? WHERE page_path = ?", (new_path, old_path))
+        cur.execute(
+            "UPDATE practice_attempts SET page_path = ?, page_title = ? WHERE page_path = ?",
+            (new_path, title, old_path),
+        )
+        cur.execute("UPDATE learning_events SET page_path = ? WHERE page_path = ?", (new_path, old_path))
     return {"old_path": old_path, "new_path": new_path, "title": title}

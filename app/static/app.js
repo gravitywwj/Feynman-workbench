@@ -10,6 +10,14 @@ const state = {
   librarySort: 'default',
   libraryStatus: 'all',
   workspace: null,
+  practiceOpen: false,
+  practiceView: 'local',
+  practiceTasks: [],
+  practiceHistory: [],
+  practiceCurrent: null,
+  practiceSelectedTask: null,
+  practicePagePath: null,
+  practiceNotice: '',
 };
 
 const readingSettingsKey = 'feynman-reading-settings';
@@ -462,6 +470,8 @@ function bindTreeEvents(wrap) {
 
 /* ===== 选中概念 → 加载正文 ===== */
 async function selectConcept(path) {
+  if (state.practicePagePath !== path) state.practiceCurrent = null;
+  state.practicePagePath = path;
   state.selected = state.concepts.find(c => c.path === path) || null;
   setHomeDashboardVisible(!state.selected);
   setConceptDrawer(false);
@@ -480,6 +490,7 @@ async function selectConcept(path) {
     syncLocalStudyIndicators();
     renderPageMeta();
     syncPageActions();
+    if (state.practiceOpen) loadPracticePanel();
     playEntryMotion(document.getElementById('page-content'));
     document.querySelectorAll('#page-body .wikilink.wl-ok').forEach(el => {
       el.addEventListener('click', () => {
@@ -1613,6 +1624,214 @@ async function relinkPage(item) {
   }
 }
 
+function practiceDate(value) { return value ? String(value).slice(0, 10) : '待测'; }
+
+function practiceTaskLabel(key) {
+  if (!key) return '外部练习';
+  return key.startsWith('metrics-') ? '精确率与召回率'
+    : key.startsWith('validation-') ? '工具调用校验' : key;
+}
+
+function practiceHelpLabel(value) {
+  return ({ none: '没有使用提示或解答', allowed_docs: '查阅指定资料', hint: '使用过提示',
+    solution: '查看过答案', unknown: '帮助程度不确定' })[value] || '帮助程度不确定';
+}
+
+function safePracticeUrl(value) {
+  try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) ? url.href : ''; }
+  catch { return ''; }
+}
+
+function practiceHistoryMarkup() {
+  if (!state.practiceHistory.length) return '<p class="practice-empty">还没有自测记录。</p>';
+  return '<div class="practice-history-list">' + state.practiceHistory.map(item => {
+    const result = item.result || {};
+    const title = item.kind === 'external' ? (item.task?.title || '外部练习') : (item.task?.title || item.task_key);
+    const status = item.kind === 'external' ? '用户自报，未自动核验'
+      : !item.submitted_at ? '未提交，可继续'
+        : result.eligible ? (result.matches ? '结果匹配' : '需复查')
+          : '练习记录 · ' + (result.matches ? '结果匹配' : '需复查');
+    const link = safePracticeUrl(item.source_url || '');
+    const row = item.kind === 'external'
+      ? '<div><b>' + esc(title) + '</b><br>' + esc(practiceDate(item.submitted_at || item.created_at)) + ' · ' + esc(status) + '</div>'
+      : '<button type="button" data-practice-resume="' + esc(item.attempt_uid) + '"><b>' + esc(title) + '</b><br>' + esc(practiceDate(item.submitted_at || item.created_at)) + ' · ' + esc(status) + '</button>';
+    return '<article class="practice-history-item">' + row +
+      (link ? '<a href="' + esc(link) + '" target="_blank" rel="noopener noreferrer">打开练习链接</a>' : '') + '</article>';
+  }).join('') + '</div>';
+}
+
+function renderPracticeEvidence() {
+  const m = state.currentMeta?.mastery || {}, p = m.practice_evidence || {};
+  const card = (title, value, detail) => '<article class="practice-evidence-card"><b>' + esc(title) + '</b><span>' + esc(value) + '</span><small>' + esc(detail) + '</small></article>';
+  const familyNames = { metrics: '指标计算', validation: '工具调用校验', unknown: '其他题组' };
+  const phase = (key, title) => {
+    const item = p[key] || { count: 0, eligible_count: 0, matches: 0 };
+    const details = Object.entries(p.by_family || {}).map(([family, evidence]) => {
+      const group = evidence[key];
+      if (!group?.count) return '';
+      const label = familyNames[family] || family;
+      const last = group.latest, activity = group.latest_activity;
+      const latestText = last
+        ? '最近合格验收：' + practiceTaskLabel(last.task_key) + ' · ' + practiceDate(last.date) + ' · ' + last.result + '；' + last.basis
+        : '没有合格验收' + (activity ? '；最近活动：' + practiceTaskLabel(activity.task_key) + ' · ' + practiceDate(activity.date) + ' · ' + activity.result : '');
+      return label + '：' + group.count + ' 次作答 · ' + group.eligible_count + ' 次合格 · ' + group.matches + ' 次匹配；' + latestText;
+    }).filter(Boolean);
+    let detail = details.join('；') || '暂无记录';
+    if (key === 'application') {
+      const external = p.external || { count: 0 };
+      detail += ' 外部练习：' + (external.count ? external.count + ' 条用户自报，未自动核验' : '待测');
+    }
+    return card(title, item.count ? item.count + ' 次作答 · ' + item.eligible_count + ' 次合格验收 · ' + item.matches + ' 次匹配' : '待测', detail);
+  };
+  const old = Number(m.historical_keyword_matches || 0);
+  const expression = Number(m.session_total || 0), checks = Number(m.source_checks || 0);
+  const expressionText = expression || checks ? expression + ' 次表达 · ' + checks + ' 次资料核对' : old ? '待核对' : '待测';
+  const expressionDetail = old
+    ? old + ' 条历史关键词匹配记录未完成事实核验；最近核对 ' + practiceDate(m.last_source_check_at)
+    : (expression ? '最近表达 ' + practiceDate(m.last_session_at) : '暂无表达记录') + '；仅计 LLM 依据资料通过的核对。';
+  document.getElementById('practice-evidence').innerHTML = [
+    card('表达与来源核对', expressionText, expressionDetail),
+    phase('application', '应用结果'), phase('transfer', '首次变式结果'), phase('delayed', '延迟结果'),
+  ].join('');
+}
+
+function practiceField(field) {
+  const key = esc(field.key), label = esc(field.label);
+  if (field.type === 'boolean') return '<label class="field-label">' + label + '<select data-answer-field="' + key + '" data-answer-type="boolean" required><option value="">选择是或否</option><option value="true">是</option><option value="false">否</option></select></label>';
+  if (field.type === 'choice') return '<label class="field-label">' + label + '<select data-answer-field="' + key + '" data-answer-type="choice" required><option value="">请选择</option>' + field.options.map(x => '<option value="' + esc(x) + '">' + esc(x) + '</option>').join('') + '</select></label>';
+  return '<label class="field-label">' + label + '<input type="number" min="0" ' + (field.type === 'number' ? 'max="1" step="any"' : 'step="1"') + ' data-answer-field="' + key + '" data-answer-type="' + esc(field.type) + '" required></label>';
+}
+
+function practiceAttemptMarkup(a) {
+  const t = a.task || {}, result = a.result || {};
+  const helpRanks = { none: 0, allowed_docs: 1, hint: 2, unknown: 3, solution: 4 };
+  const components = (result.components || []).map(x =>
+    '<div class="practice-component"><span>' + esc(x.label) + ' · ' + esc(String(x.actual)) + '</span><span class="' +
+    (x.matched ? 'matched' : 'missed') + '">' + (x.matched ? '匹配' : '标准 ' + esc(String(x.expected))) + '</span></div>'
+  ).join('');
+  let content;
+  if (a.submitted_at) {
+    content = '<section class="practice-result"><b>' + (result.matches ? '结果匹配' : '结果需复查') + ' · ' + esc(practiceDate(a.submitted_at)) +
+      '</b><p>' + esc(result.eligibility_reason || '') + ' 帮助程度：' + esc(a.assistance) + '；熟悉程度：' + esc(a.familiarity) + '（自述）。' +
+      (a.seen_before ? '重做原题。' : '') + '</p><div class="practice-components">' + components + '</div></section>';
+  } else {
+    const fields = (t.fields || []).map(practiceField).join('');
+    const helpOptions = [
+      ['none', '没有使用提示或解答'], ['allowed_docs', '查阅指定资料'],
+      ['hint', '使用过提示'], ['unknown', '不确定'], ['solution', '已查看答案'],
+    ].filter(([value]) => helpRanks[value] >= (helpRanks[a.assistance] ?? helpRanks.unknown));
+    content = '<form id="practice-submit-form"><div class="practice-form-grid">' + fields +
+      '<label class="field-label practice-wide">帮助程度（自述）<select name="assistance" ' + (helpOptions.length === 1 ? 'disabled' : '') + '>' +
+      helpOptions.map(([value, label]) => '<option value="' + value + '" ' + (value === a.assistance ? 'selected' : '') + '>' + label + '</option>').join('') + '</select></label></div>' +
+      '<div class="practice-actions"><button class="btn btn-primary" type="submit">提交并核对</button><button class="btn btn-quiet" type="button" data-practice-action="solution">查看解答</button></div></form>';
+  }
+  const solution = a.solution ? '<div class="practice-solution"><b>固定标准答案</b><pre>' + esc(JSON.stringify(a.solution, null, 2)) + '</pre></div>' : '';
+  return '<div class="practice-attempt"><h4>' + esc(t.title || a.task_key) + '</h4><div class="practice-task-info"><p>' + esc(t.prompt || '') +
+    '</p><p>' + esc(t.scope || '') + '</p><p>' + esc(t.allowed_resources || '') + ' · ' + esc(String(t.estimated_minutes || '')) +
+    ' 分钟</p></div>' + (a.before_submission_notice ? '<p>' + esc(a.before_submission_notice) + '</p>' : '') + content + solution + '</div>';
+}
+
+function practiceStartInfo(task) {
+  return '<b>' + esc(task.title) + '</b><p>' + esc(task.scope) + '</p><p>' + esc(task.allowed_resources) +
+    ' · ' + esc(task.reason) + (task.due_on ? ' · 开放日期 ' + esc(task.due_on) : '') +
+    '</p><p>验收资格由服务端按模式、帮助、重做和前置结果判断。“没见过”是你的自述。</p>';
+}
+
+function practiceAvailabilityMarkup(tasks) {
+  return '<div class="practice-task-availability"><h4>题目开放条件</h4><ul>' + tasks.map(task =>
+    '<li><b>' + esc(task.title) + '</b><span>' + esc(task.reason) + '</span></li>'
+  ).join('') + '</ul></div>';
+}
+
+function renderPracticePanel() {
+  renderPracticeEvidence();
+  document.querySelectorAll('.practice-tab').forEach(b => {
+    const active = b.dataset.practiceView === state.practiceView;
+    b.classList.toggle('active', active); b.setAttribute('aria-selected', String(active));
+  });
+  const history = '<div class="practice-history"><h4>最近记录</h4>' + practiceHistoryMarkup() + '</div>';
+  let content;
+  if (state.practiceView === 'external') {
+    content = '<div class="practice-links"><a href="https://leetcode.com/studyplan/top-interview-150/" target="_blank" rel="noopener noreferrer">LeetCode Top Interview 150</a>' +
+      '<a href="https://leetcode.com/studyplan/top-sql-50/" target="_blank" rel="noopener noreferrer">LeetCode SQL 50</a>' +
+      '<a href="https://ocw.mit.edu/courses/6-100l-introduction-to-cs-and-programming-using-python-fall-2022/lists/problem-sets/" target="_blank" rel="noopener noreferrer">MIT OCW Python 作业</a></div>' +
+      '<form id="practice-external-form" class="practice-external"><div class="practice-form-grid">' +
+      '<label class="field-label practice-wide">练习名称<input name="title" maxlength="160" required></label>' +
+      '<label class="field-label practice-wide">练习链接（可留空）<input name="source_url" type="url" maxlength="2000"></label>' +
+      '<label class="field-label practice-wide">提交结果（自述）<textarea name="reported_result" maxlength="4000"></textarea></label>' +
+      '<label class="field-label practice-wide">提交内容（可选）<textarea name="artifact_text" maxlength="10000"></textarea></label>' +
+      '<label class="field-label">熟悉程度（自述）<select name="familiarity"><option value="unknown">不确定</option><option value="unseen">此前没见过</option><option value="seen">以前见过或做过</option></select></label>' +
+      '<label class="field-label">帮助程度（自述）<select name="assistance"><option value="unknown">不确定</option><option value="none">没有帮助</option><option value="allowed_docs">查阅资料</option><option value="hint">使用提示</option><option value="solution">查看答案</option></select></label></div><button class="btn btn-primary" type="submit">保存自报记录</button></form>' + history;
+  } else if (state.practiceCurrent) {
+    content = practiceAttemptMarkup(state.practiceCurrent) + '<button class="text-btn" type="button" data-practice-action="list">返回题目列表</button>' + history;
+  } else if (!state.practiceTasks.length) {
+    content = '<p class="practice-empty">当前页面没有适配的本地自测题。仍可记录外部课程作业或平台练习。</p>' + history;
+  } else {
+    const tasks = state.practiceTasks;
+    const selected = tasks.find(x => x.task_key === state.practiceSelectedTask) || tasks.find(x => x.open) || tasks[0];
+    state.practiceSelectedTask = selected.task_key;
+    const options = tasks.map(x => '<option value="' + esc(x.task_key) + '" ' +
+      (x.task_key === selected.task_key ? 'selected ' : '') + (x.open ? '' : 'disabled ') + '>' +
+      esc(x.title) + (x.open ? '' : '（' + esc(x.reason) + '）') + '</option>').join('');
+    content = '<form id="practice-start-form" class="practice-start"><div class="practice-form-grid">' +
+      '<label class="field-label practice-wide">本地题目<select name="task_key" id="practice-task">' + options + '</select></label>' +
+      '<label class="field-label">本次方式<select name="mode"><option value="assessment">独立验收</option><option value="practice">练习</option></select></label>' +
+      '<label class="field-label">熟悉程度（自述）<select name="familiarity"><option value="unseen">此前没见过</option><option value="seen">以前见过或做过</option><option value="unknown">不确定</option></select></label>' +
+      '<label class="field-label practice-wide">已使用的帮助（自述）<select name="assistance"><option value="none">没有使用提示或解答</option><option value="hint">使用过提示</option><option value="unknown">不确定</option></select></label></div>' +
+      '<div class="practice-task-info">' + practiceStartInfo(selected) + '</div>' +
+      '<button class="btn btn-primary" type="submit" ' + (selected.open ? '' : 'disabled') + '>开始这一题</button></form>' +
+      practiceAvailabilityMarkup(tasks) + history;
+  }
+  document.getElementById('practice-content').innerHTML = content;
+  const status = document.getElementById('practice-status');
+  status.textContent = state.practiceNotice || ''; status.classList.remove('is-error'); status.classList.toggle('is-success', Boolean(state.practiceNotice));
+}
+
+async function loadPracticePanel() {
+  if (!state.selected) return;
+  try {
+    const path = state.selected.path, prior = state.practiceCurrent?.attempt_uid;
+    const results = await Promise.all([
+      api('/api/practice/tasks?page_path=' + encodeURIComponent(path)),
+      api('/api/practice/history?page_path=' + encodeURIComponent(path) + '&limit=20'),
+      api('/api/concepts/page?path=' + encodeURIComponent(path)),
+    ]);
+    if (state.selected?.path !== path) return;
+    state.practiceTasks = results[0].tasks || []; state.practiceHistory = results[1].attempts || [];
+    state.currentMeta = results[2].meta;
+    state.selected.mastery = results[2].meta.mastery;
+    renderPageMeta(); renderTree();
+    const attempt = state.practiceHistory.find(x => x.attempt_uid === prior) ||
+      state.practiceHistory.find(x => x.kind === 'builtin' && !x.submitted_at);
+    state.practiceCurrent = attempt ? await api('/api/practice/attempts/' + encodeURIComponent(attempt.attempt_uid)) : null;
+    if (!state.practiceTasks.some(x => x.task_key === state.practiceSelectedTask)) {
+      state.practiceSelectedTask = state.practiceTasks.find(x => x.open)?.task_key || state.practiceTasks[0]?.task_key || null;
+    }
+    renderPracticePanel();
+  } catch (error) {
+    const status = document.getElementById('practice-status'); status.textContent = '无法读取应用自测：' + error.message; status.classList.add('is-error');
+  }
+}
+
+function openPracticePanel() {
+  if (!state.selected) return;
+  state.practiceOpen = true; state.practiceNotice = '';
+  document.getElementById('practice-panel').classList.remove('hidden');
+  document.getElementById('btn-open-practice').setAttribute('aria-expanded', 'true');
+  loadPracticePanel();
+}
+
+function closePracticePanel() {
+  state.practiceOpen = false; state.practiceCurrent = null; document.getElementById('practice-panel').classList.add('hidden');
+  document.getElementById('btn-open-practice').setAttribute('aria-expanded', 'false');
+}
+
+function showPracticeError(message, prefix = '') {
+  const status = document.getElementById('practice-status');
+  status.textContent = prefix + message;
+  status.classList.remove('is-success'); status.classList.add('is-error');
+}
+
 function renderPageMeta() {
   const meta = state.currentMeta;
   const tagHtml = (meta.tags || []).map(t => `<span class="meta-item tag-item">#${esc(t)}</span>`).join('');
@@ -2476,11 +2695,13 @@ document.getElementById('review-card-stack').addEventListener('click', async (e)
       box.classList.remove('hidden');
       box.classList.toggle('strict', feedback.agent === 'strict');
       const evidenceCopy = {
-        source_standard: '本次回答已对上 Wiki 必备要点，计为一次来源核对。',
-        source_reviewed: '本次回答已由学习助手依据 Wiki 资料核对，计为一次来源核对。',
-        unverified: '本次不计入“已核对”或“保持中”；请用当前资料继续核对。',
+        source_standard: '历史关键词匹配记录，未完成事实核验。',
+        source_reviewed: '学习助手依据资料核对；只有通过记录计入来源核对。',
+        unverified: '待核对。本次不计入“已核对”或“保持中”。',
       }[feedback.evidence_level] || '本次核对状态暂未确定。';
-      box.innerHTML = `<b>${esc(feedback.agent_name)} · ${feedback.verdict === 'pass' ? '通过' : '需要补强'}</b><p>${esc(feedback.feedback)}</p><p>${esc(evidenceCopy)}</p><p>下一问：${esc(feedback.follow_up)}</p>`;
+      const reviewTitle = feedback.evidence_level === 'source_reviewed' && feedback.verdict === 'pass' ? '依据资料核对通过' : '待核对';
+      box.innerHTML = '<b>' + esc(feedback.agent_name) + ' · ' + reviewTitle + '</b><p>' + esc(feedback.feedback) + '</p><p>' +
+        esc(evidenceCopy) + '</p><p>下一问：' + esc(feedback.follow_up) + '</p>';
     } catch (err) {
       item.querySelector('.review-feedback').innerHTML = `<p>${esc(err.message)}</p>`;
       item.querySelector('.review-feedback').classList.remove('hidden');
@@ -2531,6 +2752,23 @@ async function showWeeklyReport() {
       <h3>下周优先解决 1–3 件事</h3>${(diagnostic.next_week_priorities || []).map((item, index) => `<button class="history-item weekly-priority weekly-path-item" type="button" data-path="${esc(item.path)}"><div class="history-item-head"><span>${index + 1}. ${esc(item.title)}</span><small>约 ${item.estimated_minutes} 分钟</small></div><p><b>为什么：</b>${esc(item.why)}</p><p><b>完成后：</b>${esc(item.benefit)}</p></button>`).join('') || '<p class="review-empty">连接资料后，这里会给出下周最少且可执行的优先项。</p>'}
       <h3>仍需继续核对的理解</h3>${report.corrected_misconceptions.map(item => `<article class="history-item"><div class="history-item-head"><span>${esc(item.title)}</span><small>${item.times > 1 ? `重复 ${item.times} 次` : '待后续验证'}</small></div><p>${esc(item.gap)}</p></article>`).join('') || '<p class="review-empty">本周没有记录到待澄清点。</p>'}
       <h3>保持中</h3>${report.maintaining_concepts.map(item => `<button class="recent-note report-concept" type="button" data-path="${esc(item.path)}"><span>${esc(item.title)}</span><small>已通过多次来源核对</small></button>`).join('') || '<p class="review-empty">完成多次来源核对并拉开间隔后，这里会出现保持中的概念。</p>'}</section>`;
+    const practice = report.practice || {};
+    const practiceNames = { application: '应用题', transfer: '首次变式', delayed: '延迟复测' };
+    const familyNames = { metrics: '指标计算', validation: '工具调用校验', unknown: '其他题组' };
+    const practiceCards = Object.entries(practice.by_family || {}).flatMap(([family, phases]) =>
+      ['application', 'transfer', 'delayed'].map(key => {
+        const item = phases[key] || {};
+        const value = item.assessments
+          ? '验收 ' + item.assessments + ' 次 · 匹配 ' + (item.matches || 0) + ' · 需复查 ' + (item.needs_review || 0)
+          : '待测';
+        const extra = item.practice_runs ? ' · 练习 ' + item.practice_runs + ' 次' : '';
+        return '<span>' + esc(familyNames[family] || family) + ' · ' + practiceNames[key] + '<b>' + value + extra + '</b></span>';
+      })
+    ).join('');
+    const practiceBlock = (report.history_notice ? '<p class="report-empty">' + esc(report.history_notice) + '</p>' : '') +
+      '<h3>应用自测与外部练习</h3><div class="weekly-summary">' + practiceCards +
+      '<span>外部自报<b>' + ((practice.external || {}).self_reported || 0) + ' 条 · 未自动核验</b></span></div>';
+    content.querySelector('.weekly-report').insertAdjacentHTML('afterbegin', practiceBlock);
     content.querySelectorAll('.report-concept, .weekly-path-item').forEach(button => button.addEventListener('click', () => {
       document.getElementById('history-modal').classList.add('hidden'); selectConcept(button.dataset.path);
     }));
@@ -2848,6 +3086,91 @@ document.getElementById('btn-mobile-concept-drawer').addEventListener('click', (
 document.getElementById('concept-drawer-backdrop').addEventListener('click', () => setConceptDrawer(false));
 document.getElementById('btn-start').addEventListener('click', openRecall);
 document.getElementById('btn-start-inline').addEventListener('click', openRecall);
+document.getElementById('btn-open-practice').addEventListener('click', () => state.practiceOpen ? closePracticePanel() : openPracticePanel());
+document.getElementById('btn-close-practice').addEventListener('click', closePracticePanel);
+document.querySelectorAll('.practice-tab').forEach(button => button.addEventListener('click', () => {
+  state.practiceView = button.dataset.practiceView;
+  renderPracticePanel();
+}));
+document.getElementById('practice-panel').addEventListener('change', event => {
+  if (event.target.id === 'practice-task') {
+    state.practiceSelectedTask = event.target.value;
+    const task = state.practiceTasks.find(item => item.task_key === event.target.value);
+    const form = document.getElementById('practice-start-form');
+    if (task && form) {
+      form.querySelector('.practice-task-info').innerHTML = practiceStartInfo(task);
+      form.querySelector('button[type="submit"]').disabled = !task.open;
+    }
+  }
+});
+document.getElementById('practice-panel').addEventListener('click', async event => {
+  const button = event.target.closest('[data-practice-action], [data-practice-resume]');
+  if (!button) return;
+  if (button.dataset.practiceAction === 'list') {
+    state.practiceCurrent = null; state.practiceNotice = ''; renderPracticePanel(); return;
+  }
+  if (button.dataset.practiceAction === 'solution') {
+    button.disabled = true;
+    try {
+      state.practiceCurrent = await api('/api/practice/attempts/' + encodeURIComponent(state.practiceCurrent.attempt_uid) + '/solution', { method: 'POST' });
+      state.practiceNotice = state.practiceCurrent.before_submission_notice || '';
+      renderPracticePanel();
+    } catch (error) {
+      showPracticeError(error.message);
+      button.disabled = false;
+    }
+    return;
+  }
+  if (button.dataset.practiceResume) {
+    try {
+      state.practiceCurrent = await api('/api/practice/attempts/' + encodeURIComponent(button.dataset.practiceResume));
+      state.practiceView = 'local'; state.practiceNotice = ''; renderPracticePanel();
+    } catch (error) {
+      showPracticeError(error.message);
+    }
+  }
+});
+document.getElementById('practice-panel').addEventListener('submit', async event => {
+  const form = event.target;
+  if (!['practice-start-form', 'practice-submit-form', 'practice-external-form'].includes(form.id)) return;
+  event.preventDefault();
+  const button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  try {
+    const fields = Object.fromEntries(new FormData(form).entries());
+    if (form.id === 'practice-start-form') {
+      state.practiceSelectedTask = fields.task_key;
+      state.practiceCurrent = await api('/api/practice/attempts', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ page_path: state.selected.path, ...fields }),
+      });
+      state.practiceNotice = '';
+    } else if (form.id === 'practice-submit-form') {
+      const answer = {};
+      form.querySelectorAll('[data-answer-field]').forEach(input => {
+        const type = input.dataset.answerType;
+        answer[input.dataset.answerField] = type === 'boolean' ? input.value === 'true'
+          : type === 'integer' || type === 'number' ? Number(input.value) : input.value;
+      });
+      state.practiceCurrent = await api('/api/practice/attempts/' + encodeURIComponent(state.practiceCurrent.attempt_uid) + '/submit', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ answer, assistance: fields.assistance }),
+      });
+      state.practiceNotice = '本次自测已保存。';
+    } else {
+      await api('/api/practice/external-attempts', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ page_path: state.selected.path, ...fields }),
+      });
+      state.practiceNotice = '外部练习已保存为用户自报记录。';
+    }
+    await loadPracticePanel();
+  } catch (error) {
+    showPracticeError(error.message, '未保存：');
+  } finally {
+    if (button.isConnected) button.disabled = false;
+  }
+});
 document.getElementById('btn-open-notes').addEventListener('click', openNotes);
 document.getElementById('btn-close-notes').addEventListener('click', closeNotes);
 document.getElementById('btn-save-notes').addEventListener('click', saveNotes);

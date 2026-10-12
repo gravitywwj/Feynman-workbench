@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+
 from app import db
+from app.services import practice_sessions
 
 LEVELS = ("unseen", "read", "recalled", "checked", "maintaining")
 LABELS = {
@@ -19,7 +22,8 @@ def _row_stats() -> dict[str, dict]:
     with db.cursor() as cur:
         session_rows = cur.execute(
             "SELECT page_path, COUNT(*) AS session_total, "
-            "SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS done_total "
+            "SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS done_total, "
+            "MAX(updated_at) AS last_session_at "
             "FROM sessions GROUP BY page_path"
         ).fetchall()
         card_rows = cur.execute(
@@ -37,20 +41,27 @@ def _row_stats() -> dict[str, dict]:
         review_rows = cur.execute(
             "SELECT sessions.page_path, "
             "SUM(CASE WHEN review_attempts.verdict = 'pass' "
-            "AND review_attempts.evidence_level IN ('source_standard', 'source_reviewed') THEN 1 ELSE 0 END) AS source_checks "
+            "AND review_attempts.source = 'llm' AND review_attempts.evidence_level = 'source_reviewed' THEN 1 ELSE 0 END) AS source_checks "
             ", COUNT(DISTINCT CASE WHEN review_attempts.verdict = 'pass' "
-            "AND review_attempts.evidence_level IN ('source_standard', 'source_reviewed') "
+            "AND review_attempts.source = 'llm' AND review_attempts.evidence_level = 'source_reviewed' "
             "THEN substr(review_attempts.created_at, 1, 10) END) AS source_check_days "
             ", COALESCE(CAST(julianday(MAX(CASE WHEN review_attempts.verdict = 'pass' "
-            "AND review_attempts.evidence_level IN ('source_standard', 'source_reviewed') THEN review_attempts.created_at END)) "
+            "AND review_attempts.source = 'llm' AND review_attempts.evidence_level = 'source_reviewed' THEN review_attempts.created_at END)) "
             "- julianday(MIN(CASE WHEN review_attempts.verdict = 'pass' "
-            "AND review_attempts.evidence_level IN ('source_standard', 'source_reviewed') THEN review_attempts.created_at END)) AS INTEGER), 0) AS source_check_span_days "
+            "AND review_attempts.source = 'llm' AND review_attempts.evidence_level = 'source_reviewed' THEN review_attempts.created_at END)) AS INTEGER), 0) AS source_check_span_days "
+            ", SUM(CASE WHEN review_attempts.evidence_level = 'source_standard' THEN 1 ELSE 0 END) AS historical_keyword_matches "
+            ", MAX(CASE WHEN review_attempts.verdict = 'pass' AND review_attempts.source = 'llm' "
+            "AND review_attempts.evidence_level = 'source_reviewed' THEN review_attempts.created_at END) AS last_source_check_at "
             "FROM sessions JOIN cards ON cards.session_id = sessions.id "
             "LEFT JOIN review_attempts ON review_attempts.card_id = cards.id "
             "GROUP BY sessions.page_path"
         ).fetchall()
         confidence_rows = cur.execute(
             "SELECT page_path, confidence FROM self_assessments"
+        ).fetchall()
+        practice_rows = cur.execute(
+            "SELECT page_path, kind, mode, phase, task_key, result_json, submitted_at "
+            "FROM practice_attempts WHERE submitted_at IS NOT NULL ORDER BY submitted_at DESC, id DESC"
         ).fetchall()
     stats = {row["page_path"]: dict(row) for row in session_rows}
     for row in card_rows:
@@ -61,6 +72,62 @@ def _row_stats() -> dict[str, dict]:
         stats.setdefault(row["page_path"], {}).update(dict(row))
     for row in confidence_rows:
         stats.setdefault(row["page_path"], {}).update({"self_confidence": row["confidence"]})
+    practice: dict[str, dict] = {}
+    for row in practice_rows:
+        page = practice.setdefault(row["page_path"], {
+            phase: {"count": 0, "eligible_count": 0, "matches": 0, "latest": None, "latest_activity": None}
+            for phase in ("application", "transfer", "delayed")
+        } | {"external": {"count": 0, "latest": None}, "by_family": {}})
+        try:
+            attempt_result = json.loads(row["result_json"] or "{}")
+        except (TypeError, ValueError):
+            attempt_result = {}
+        kind = row["kind"]
+        latest = {
+            "task_key": row["task_key"] or None,
+            "date": str(row["submitted_at"] or "")[:10],
+            "result": (
+                "用户自报，未自动核验" if kind == "external"
+                else "待核对" if attempt_result.get("matches") is None
+                else "结果匹配" if attempt_result.get("matches") and attempt_result.get("eligible")
+                else "需复查" if attempt_result.get("eligible")
+                else "练习结果匹配" if attempt_result.get("matches")
+                else "练习结果需复查"
+            ),
+            "basis": "用户自报，未自动核验" if kind == "external"
+            else attempt_result.get("eligibility_reason") or "本地固定标准逐项匹配",
+        }
+        if kind == "external":
+            page["external"]["count"] += 1
+            if page["external"]["latest"] is None:
+                page["external"]["latest"] = latest
+        elif row["phase"] in page:
+            phase_data = page[row["phase"]]
+            family = practice_sessions._TASKS_BY_KEY.get(row["task_key"], {}).get("family", "unknown")
+            family_data = page["by_family"].setdefault(family, {
+                phase: {"count": 0, "eligible_count": 0, "matches": 0, "latest": None, "latest_activity": None}
+                for phase in ("application", "transfer", "delayed")
+            })[row["phase"]]
+            phase_data["count"] += 1
+            eligible = row["mode"] == "assessment" and bool(attempt_result.get("eligible"))
+            phase_data["eligible_count"] += int(eligible)
+            phase_data["matches"] += int(eligible and attempt_result.get("matches") is True)
+            family_data["count"] += 1
+            family_data["eligible_count"] += int(eligible)
+            family_data["matches"] += int(eligible and attempt_result.get("matches") is True)
+            if phase_data["latest_activity"] is None:
+                phase_data["latest_activity"] = latest
+            if eligible and phase_data["latest"] is None:
+                phase_data["latest"] = latest
+            if family_data["latest_activity"] is None:
+                family_data["latest_activity"] = latest
+            if eligible and family_data["latest"] is None:
+                family_data["latest"] = latest
+    for path, evidence in practice.items():
+        for phase in ("application", "transfer", "delayed"):
+            evidence[phase]["latest"] = evidence[phase]["latest"] or evidence[phase]["latest_activity"]
+            del evidence[phase]["latest_activity"]
+        stats.setdefault(path, {})["practice_evidence"] = evidence
     return stats
 
 
@@ -92,6 +159,13 @@ def overview(concepts: list[dict]) -> dict[str, dict]:
             "checked": "至少一次回答已依据 Wiki 原文或明确要点完成核对",
             "maintaining": "已在至少 14 天内多次通过来源核对，仍应继续复习",
         }[level]
+        historical_keyword_matches = int(stat.get("historical_keyword_matches") or 0)
+        if historical_keyword_matches:
+            detail += f"；另有 {historical_keyword_matches} 条历史关键词匹配记录未完成事实核验，旧状态可能回退"
+        practice_evidence = stat.get("practice_evidence", {
+            phase: {"count": 0, "eligible_count": 0, "matches": 0, "latest": None}
+            for phase in ("application", "transfer", "delayed")
+        } | {"external": {"count": 0, "latest": None}})
         result[concept["path"]] = {
             "level": level,
             "label": LABELS[level],
@@ -101,6 +175,10 @@ def overview(concepts: list[dict]) -> dict[str, dict]:
             "session_total": int(stat.get("session_total") or 0),
             "source_checks": int(stat.get("source_checks") or 0),
             "source_check_span_days": int(stat.get("source_check_span_days") or 0),
+            "historical_keyword_matches": historical_keyword_matches,
+            "last_session_at": stat.get("last_session_at"),
+            "last_source_check_at": stat.get("last_source_check_at"),
+            "practice_evidence": practice_evidence,
             "self_confidence": int(stat["self_confidence"]) if stat.get("self_confidence") else None,
         }
     return result

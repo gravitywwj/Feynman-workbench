@@ -90,10 +90,12 @@ def test_mastery_requires_source_checks_not_only_ratings(wiki):
     answer = "。".join(card["required_points"]) + "。我会回到原文继续核对每一个要点。"
     first_check = client.post(f"/api/study/reviews/{card_id}/attempt", json={"agent": "strict", "answer": answer})
     assert first_check.status_code == 200
-    assert first_check.json()["evidence_level"] == "source_standard"
+    assert first_check.json()["verdict"] == "retry"
+    assert first_check.json()["source"] == "local"
+    assert first_check.json()["evidence_level"] == "unverified"
     concepts = client.get("/api/concepts").json()["concepts"]
     concept = next(item for item in concepts if item["path"] == PAGE)
-    assert concept["mastery"]["level"] == "checked"
+    assert concept["mastery"]["level"] == "recalled"
 
     # A second click on the same day must not be mistaken for spaced retention.
     with db.cursor() as cur:
@@ -102,7 +104,51 @@ def test_mastery_requires_source_checks_not_only_ratings(wiki):
     assert second_check.status_code == 200
     concepts = client.get("/api/concepts").json()["concepts"]
     concept = next(item for item in concepts if item["path"] == PAGE)
+    assert concept["mastery"]["level"] == "recalled"
+    assert client.get("/api/study/weekly-report").json()["summary"]["source_checks"] == 0
+
+    # Old keyword records stay intact but no longer count as factual verification.
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO review_attempts (card_id, agent, answer, verdict, feedback, follow_up, source, evidence_level) "
+            "VALUES (?, 'strict', ?, 'pass', '', '', 'local', 'source_standard')",
+            (card_id, answer),
+        )
+    concept = next(item for item in client.get("/api/concepts").json()["concepts"] if item["path"] == PAGE)
+    assert concept["mastery"]["level"] == "recalled"
+    assert concept["mastery"]["historical_keyword_matches"] == 1
+    report = client.get("/api/study/weekly-report").json()
+    assert report["summary"]["source_checks"] == 0
+    assert report["summary"]["historical_keyword_matches"] == 1
+    assert "历史关键词匹配记录" in report["history_notice"]
+    exported = client.get("/api/study/export").json()
+    assert any(item["evidence_level"] == "source_standard" for item in exported["review_attempts"])
+    assert client.post("/api/study/import", json={"payload": exported}).status_code == 200
+    with db.cursor() as cur:
+        assert cur.execute("SELECT COUNT(*) FROM review_attempts WHERE evidence_level = 'source_standard'").fetchone()[0] == 1
+    assert client.get("/api/study/weekly-report").json()["summary"]["source_checks"] == 0
+
+
+def test_source_reviewed_pass_keeps_fourteen_day_mastery_span(wiki, monkeypatch):
+    monkeypatch.setattr(
+        "app.services.review_coach.assess",
+        lambda *args, **kwargs: ("pass", "依据原文核对通过", "继续复习", "llm", "source_reviewed"),
+    )
+    created = client.post("/api/study/sessions", json={
+        "page_path": PAGE,
+        "explanation": "查询改写会补充对象、场景和约束，再让检索系统寻找更符合任务的资料。",
+    }).json()
+    card = created["cards"][0]
+    answer = "依据资料逐项解释对象、场景和约束如何改变查询与结果。"
+    first = client.post(f"/api/study/reviews/{card['id']}/attempt", json={"agent": "strict", "answer": answer})
+    assert first.json()["evidence_level"] == "source_reviewed"
+    with db.cursor() as cur:
+        cur.execute("UPDATE review_attempts SET created_at = datetime('now', '-14 days') WHERE id = ?", (first.json()["id"],))
+    second = client.post(f"/api/study/reviews/{card['id']}/attempt", json={"agent": "feynman", "answer": answer})
+    assert second.json()["evidence_level"] == "source_reviewed"
+    concept = next(item for item in client.get("/api/concepts").json()["concepts"] if item["path"] == PAGE)
     assert concept["mastery"]["level"] == "maintaining"
+    assert concept["mastery"]["source_check_span_days"] >= 14
 
 
 def test_session_can_be_simplified_into_learning_outcome(wiki):
@@ -417,7 +463,7 @@ def test_reflections_are_timestamped_exported_and_can_be_summarized(wiki):
     assert summary.json()["summary_source"] in {"local", "llm"}
 
     exported = client.get("/api/study/export").json()
-    assert exported["version"] == 5
+    assert exported["version"] == 6
     assert len(exported["reflections"]) == 2
     assert exported["reflections"][0]["session_id"] == created["session"]["id"]
     preview = client.post("/api/study/import/preview", json={"payload": exported})
@@ -531,7 +577,11 @@ def test_contextual_recommendation_uses_study_settings_and_self_confidence(wiki)
     assert action["why"]
 
 
-def test_weekly_report_exposes_error_clusters_progress_evidence_and_priorities(wiki):
+def test_weekly_report_exposes_error_clusters_progress_evidence_and_priorities(wiki, monkeypatch):
+    monkeypatch.setattr(
+        "app.services.review_coach.assess",
+        lambda *args, **kwargs: ("pass", "依据资料核对", "继续复习", "llm", "source_reviewed"),
+    )
     created = client.post("/api/study/sessions", json={
         "page_path": PAGE,
         "explanation": "查询改写有用，但我没有说明对象、因果步骤或适用条件。",

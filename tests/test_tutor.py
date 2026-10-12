@@ -1,7 +1,10 @@
+import sys
+from types import SimpleNamespace
+
 import pytest
 
 from app import config
-from app.services import tutor
+from app.services import review_coach, tutor
 
 
 @pytest.fixture(autouse=True)
@@ -76,6 +79,88 @@ def test_local_gap_revision_is_not_marked_verified(monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     status, _, source = tutor.assess_gap_revision("这是足够长的补充说明，解释了机制、原因并包含一个具体例子。", "补充例子", "查询改写", "<p>reference</p>")
     assert (status, source) == ("revised", "local")
+
+
+def test_gap_revision_without_reference_never_calls_ai(monkeypatch):
+    monkeypatch.setattr(tutor, "get_llm_config", lambda: {
+        "api_key": "test-key", "base_url": "https://example.test", "model": "test", "mode": "ai",
+    })
+    monkeypatch.setattr(tutor, "_call_llm", lambda *_: (_ for _ in ()).throw(AssertionError("must not call AI")))
+    status, feedback, source = tutor.assess_gap_revision("补充内容", "原盲区", "主题", "")
+    assert (status, source) == ("revised", "local")
+    assert "没有可用参考资料" in feedback
+
+
+def test_gap_revision_passes_retest_prompt_to_ai(monkeypatch):
+    monkeypatch.setattr(tutor, "get_llm_config", lambda: {
+        "api_key": "test-key", "base_url": "https://example.test", "model": "test", "mode": "ai",
+    })
+    prompts = []
+
+    def fake_call(_config, messages):
+        prompts.append(messages[-1]["content"])
+        return '{"status":"verified","feedback":"符合资料"}'
+
+    monkeypatch.setattr(tutor, "_call_llm", fake_call)
+    status, _, source = tutor.assess_gap_revision(
+        "补充说明", "原盲区", "主题", "<p>参考</p>", "用另一个情境判断",
+    )
+    assert (status, source) == ("verified", "llm")
+    assert "用另一个情境判断" in prompts[0]
+
+
+@pytest.mark.parametrize(("content", "expected"), [
+    ('{"verdict":"pass","feedback":"符合资料","follow_up":"继续"}', ("pass", "llm", "source_reviewed")),
+    ('{"verdict":"retry","feedback":"有缺口","follow_up":"再核对"}', ("retry", "llm", "unverified")),
+    ("not json", ("retry", "local", "unverified")),
+    ('{"verdict":"pass","feedback":"缺少追问"}', ("retry", "local", "unverified")),
+    ('{"verdict":"pass","feedback":[],"follow_up":"继续"}', ("retry", "local", "unverified")),
+    ('{"verdict":"pass","feedback":"符合资料","follow_up":{}}', ("retry", "local", "unverified")),
+    ('{"verdict":1,"feedback":"符合资料","follow_up":"继续"}', ("retry", "local", "unverified")),
+    (None, ("retry", "local", "unverified")),
+])
+def test_review_coach_only_source_grounded_ai_pass_is_verified(monkeypatch, content, expected):
+    monkeypatch.setattr(review_coach, "get_llm_config", lambda: {
+        "api_key": "test-key", "base_url": "https://example.test", "model": "test", "mode": "ai",
+    })
+    def create_completion(**_):
+        if content is None:
+            raise TimeoutError("mock timeout")
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create_completion)))
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=lambda **_: fake_client))
+    result = review_coach.assess(
+        "answer", question="question", expected="source summary", required_points=["point"],
+        reference_status="source", title="topic", reference_html="<p>source</p>", agent="strict",
+    )
+    assert (result[0], result[3], result[4]) == expected
+
+
+def test_local_feedback_never_verifies_keyword_or_long_text(monkeypatch):
+    monkeypatch.setattr(review_coach, "get_llm_config", lambda: {"mode": "local", "api_key": ""})
+    for agent in ("feynman", "strict"):
+        for answer in (
+            "Input validation is forbidden. Output verification is forbidden. Skip both checks entirely.",
+            "Input validation Output verification Input validation Output verification " * 20,
+            "x" * 3000,
+            "Input validation is required. Output verification is required.",
+        ):
+            result = review_coach.assess(
+                answer, question="question", expected="summary", required_points=["Input validation", "Output verification"],
+                reference_status="source", title="topic", reference_html="<p>source</p>", agent=agent,
+            )
+            assert result[0] == "retry"
+            assert result[3:] == ("local", "unverified")
+
+
+def test_review_coach_without_reference_does_not_call_ai(monkeypatch):
+    monkeypatch.setattr(review_coach, "get_llm_config", lambda: (_ for _ in ()).throw(AssertionError("no reference")))
+    result = review_coach.assess(
+        "answer", question="question", expected="", required_points=[], reference_status="needs_review",
+        title="topic", reference_html="", agent="strict",
+    )
+    assert result[0] == "retry" and result[3:] == ("local", "unverified")
 
 
 def test_local_structure_prompt_accepts_explicit_function_calling_chain(monkeypatch):
