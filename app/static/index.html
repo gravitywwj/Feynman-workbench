@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>费曼学习工作台</title>
-<link rel="stylesheet" href="/static/style.css?v=20261015-flexible-focus">
+<link rel="stylesheet" href="/static/style.css?v=20261015-learning-recommendations">
 </head>
 <body>
 
@@ -109,6 +109,7 @@
         <progress id="home-progress-bar" max="5" value="0">0 / 5</progress>
         <p id="home-progress-hint">完成一次回忆表达后，这里会记录本周的学习节奏。</p>
       </div>
+      <section class="learning-recommendations" data-recommendations aria-label="关联学习推荐" aria-live="polite"></section>
       <section class="home-update-reminder" aria-labelledby="home-update-title" aria-live="polite">
         <div class="home-update-head">
           <div>
@@ -253,6 +254,7 @@
     </div>
 
     <div id="default-right-rail" class="default-right-rail">
+    <section class="panel learning-recommendations" data-recommendations aria-label="关联学习推荐" aria-live="polite"></section>
     <section class="panel path-card">
       <div class="panel-head"><h2>回忆表达参考</h2></div>
       <p class="focus-help">需要检查表达时使用，可随时回到资料或应用。</p>
@@ -592,6 +594,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20261015-flexible-focus"></script>
+<script src="/static/app.js?v=20261015-learning-recommendations"></script>
 </body>
 </html>

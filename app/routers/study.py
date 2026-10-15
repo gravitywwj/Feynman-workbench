@@ -1,9 +1,10 @@
 """学习会话、笔记与间隔复习 API。"""
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from app import config
-from app.services import study_sessions
+from app.services import learning_recommendations, study_sessions
 
 router = APIRouter(prefix="/api/study", tags=["study"])
 
@@ -171,6 +172,22 @@ def home_action() -> dict:
 @router.get("/today-summary")
 def today_summary() -> dict:
     return study_sessions.today_study_summary()
+
+
+@router.get("/recommendations")
+def reading_recommendations(page_path: str | None = None) -> dict:
+    try:
+        return learning_recommendations.recommendations(page_path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/recommendations/brief", response_class=PlainTextResponse)
+def wiki_maintenance_brief(page_path: str | None = None) -> PlainTextResponse:
+    data = reading_recommendations(page_path)
+    return PlainTextResponse(learning_recommendations.maintenance_brief(data), headers={
+        "Content-Disposition": 'attachment; filename="wiki-learning-brief.md"',
+    })
 
 
 @router.get("/focus")

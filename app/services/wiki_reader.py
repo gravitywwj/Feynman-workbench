@@ -306,61 +306,6 @@ def build_graph() -> dict:
     }
 
 
-def recommend_next_concept(path: str) -> dict | None:
-    """Recommend a transparent next step, never a title-sorted pseudo-personalisation."""
-    concepts = scan_concepts()
-    by_path = {concept["path"]: concept for concept in concepts}
-    current = by_path.get(path)
-    if not current:
-        return None
-    current_mastery = current.get("mastery", {})
-    if current_mastery.get("due_cards"):
-        return {
-            **current,
-            "recommendation_reason": f"当前概念有 {current_mastery['due_cards']} 张到期复习卡，先巩固刚学过的内容。",
-            "recommendation_kind": "due_review",
-        }
-    if current_mastery.get("open_gaps"):
-        return {
-            **current,
-            "recommendation_reason": f"当前概念还有 {current_mastery['open_gaps']} 个待澄清点，先补全再扩展新主题。",
-            "recommendation_kind": "open_gap",
-        }
-    linked_paths: list[str] = []
-    for link in build_graph()["links"]:
-        if link["source"] == path:
-            linked_paths.append(link["target"])
-        elif link["target"] == path:
-            linked_paths.append(link["source"])
-    linked = [by_path[item] for item in linked_paths if item in by_path]
-    linked.sort(key=lambda concept: (
-        0 if concept.get("mastery", {}).get("open_gaps") else 1,
-        0 if concept.get("mastery", {}).get("level") in {"unseen", "read"} else 1,
-        concept["title"],
-    ))
-    if linked:
-        candidate = linked[0]
-        return {
-            **candidate,
-            "recommendation_reason": "它与当前主题在笔记中有直接 Wiki 链接；先学习这个相邻概念能延续同一条知识链。",
-            "recommendation_kind": "linked_neighbour",
-        }
-    same_section = [
-        concept for concept in concepts
-        if concept["path"] != path and concept.get("section") == current.get("section")
-        and concept.get("mastery", {}).get("level") in {"unseen", "read"}
-    ]
-    same_section.sort(key=lambda concept: concept["title"])
-    if same_section:
-        candidate = same_section[0]
-        return {
-            **candidate,
-            "recommendation_reason": "当前笔记没有可用的直接链接；这是同一知识领域中尚未完成回忆表达的概念。",
-            "recommendation_kind": "same_section",
-        }
-    return None
-
-
 def render_page_html(path: str) -> tuple[dict, str]:
     """读取页面 → (meta, 正文 HTML)。wikilink 转成可点击样式（内部概念跳转）或不存在的目标转灰显。"""
     meta, body = read_page_markdown(path)

@@ -97,6 +97,7 @@ async function loadTodayStudyTime() {
 }
 
 async function loadHomeAction() {
+  loadReadingRecommendations();
   const title = document.getElementById('home-action-title');
   const detail = document.getElementById('home-action-detail');
   const button = document.getElementById('btn-home-action');
@@ -142,6 +143,31 @@ function setHomeDashboardVisible(active) {
   document.getElementById('dashboard-rail').classList.toggle('hidden', !active);
   document.getElementById('default-right-rail').classList.toggle('hidden', active);
 }
+
+async function loadReadingRecommendations() {
+  const path = state.selected?.path || '';
+  const containers = [...document.querySelectorAll('[data-recommendations]')];
+  const query = path ? '?page_path=' + encodeURIComponent(path) : '';
+  try {
+    const data = await api('/api/study/recommendations' + query);
+    if ((state.selected?.path || '') !== path) return;
+    const rows = data.notes.map(note => `<button type="button" class="reading-suggestion" data-reading-path="${encodeURIComponent(note.path)}"><b>${esc(note.title)}</b><span>${esc(note.why)}</span><small>${esc(note.mastery)}</small></button>`).join('');
+    const topics = data.topics.map(topic => `<li><b>${esc(topic.title)}</b><p>${esc(topic.reason)} · ${esc(topic.source_page)}</p><p>${topic.coverage.length ? '已有相关笔记：' + topic.coverage.map(note => esc(note.title)).join('、') : '关键词检索暂未找到覆盖笔记，需核查。'}</p></li>`).join('');
+    const html = `<div class="recommendations-head"><h3>接着读什么</h3><button class="text-btn" type="button" data-refresh-recommendations>刷新推荐</button></div><p class="recommendations-hint">依据学习记录与 Wiki 关联，自由选择。</p><div class="reading-suggestions">${rows || `<p>${esc(data.empty_reason)}</p>`}</div><details class="learning-topics"><summary>待补充主题 · ${data.topics.length}</summary><p>这些是待核查的学习需求；先检查已有笔记，再查一手来源。</p>${topics ? `<ul>${topics}</ul>` : '<p>当前没有待补充候选。</p>'}<a class="text-btn" href="/api/study/recommendations/brief${query}" download="wiki-learning-brief.md">导出 Wiki 维护清单</a></details>`;
+    containers.forEach(container => { container.innerHTML = html; });
+  } catch (error) {
+    if ((state.selected?.path || '') !== path) return;
+    containers.forEach(container => {
+      container.innerHTML = `<h3>接着读什么</h3><p role="status">推荐暂不可用：${esc(error.message)}</p><button class="text-btn" type="button" data-refresh-recommendations>重新加载推荐</button>`;
+    });
+  }
+}
+
+document.addEventListener('click', event => {
+  const suggestion = event.target.closest('[data-reading-path]');
+  if (suggestion) selectConcept(decodeURIComponent(suggestion.dataset.readingPath));
+  if (event.target.closest('[data-refresh-recommendations]')) loadReadingRecommendations();
+});
 
 function dashboardExcerpt(value, limit = 52) {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
@@ -471,6 +497,7 @@ async function selectConcept(path) {
   if (state.practicePagePath !== path) state.practiceCurrent = null;
   state.practicePagePath = path;
   state.selected = state.concepts.find(c => c.path === path) || null;
+  loadReadingRecommendations();
   setHomeDashboardVisible(!state.selected);
   setConceptDrawer(false);
   renderTree();
@@ -933,6 +960,7 @@ async function saveNotes() {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: value }),
     });
     document.getElementById('notes-status').textContent = value.trim() ? '已保存到本地学习库。' : '笔记已清空。';
+    loadReadingRecommendations();
   } catch (e) {
     document.getElementById('notes-status').textContent = '学习库暂不可用，已保存在浏览器。';
   }
@@ -1408,6 +1436,7 @@ async function saveReflection() {
     });
     reflectionDraft = null;
     await renderReflections();
+    loadReadingRecommendations();
   } catch (e) {
     button.disabled = false;
     button.textContent = '保存心得';
@@ -3382,6 +3411,7 @@ document.getElementById('practice-panel').addEventListener('submit', async event
         body: JSON.stringify({ answer, assistance: fields.assistance }),
       });
       state.practiceNotice = '本次自测已保存。';
+      loadReadingRecommendations();
     } else {
       await api('/api/practice/external-attempts', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },

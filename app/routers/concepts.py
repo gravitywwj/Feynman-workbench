@@ -43,6 +43,7 @@ def get_page(path: str = Query(..., description="pages/ 相对路径")) -> dict:
         raise HTTPException(status_code=404, detail=f"页面不存在: {path}")
     concepts = {item["path"]: item for item in wiki_reader.scan_concepts()}
     meta.setdefault("path", path)
+    meta.setdefault("title", concepts.get(path, {}).get("title") or path.rsplit("/", 1)[-1].removesuffix(".md"))
     meta["mastery"] = concepts.get(path, {}).get("mastery", {"level": "unseen", "label": "未接触"})
     meta["read_time"] = wiki_reader.display_size(meta.get("line_count", 0) or 0)
     return {"meta": meta, "html": html}

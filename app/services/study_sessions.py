@@ -11,7 +11,16 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from app import config, db
-from app.services import mastery, practice_sessions, review_coach, review_schedule, tutor, wiki_reader, wiki_writer
+from app.services import (
+    learning_recommendations,
+    mastery,
+    practice_sessions,
+    review_coach,
+    review_schedule,
+    tutor,
+    wiki_reader,
+    wiki_writer,
+)
 
 MIN_REVIEW_ANSWER_LENGTH = 24
 MIN_GAP_REVISION_LENGTH = 24
@@ -432,6 +441,9 @@ def _recommendation_candidates(*, exclude_path: str | None = None, limit: int = 
 
 
 def contextual_recommendation(*, exclude_path: str | None = None) -> dict | None:
+    if exclude_path:
+        notes = learning_recommendations.recommendations(exclude_path)["notes"]
+        return {**notes[0], "recommendation_reason": notes[0]["why"]} if notes else None
     candidates = _recommendation_candidates(exclude_path=exclude_path, limit=1)
     return candidates[0] if candidates else None
 

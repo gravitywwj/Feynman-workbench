@@ -172,6 +172,22 @@ body.home-mode .empty-state.focus-home #btn-home-action { margin-top: 0; }
 .focus-form textarea::placeholder { color: var(--ink-soft); opacity: 1; }
 .focus-time-label { max-width: 240px; }
 .focus-status:not(:empty) { margin-top: 10px; }
+.learning-recommendations { width: 100%; min-width: 0; text-align: left; }
+.empty-state > .learning-recommendations { width: min(100%, 540px); margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--line); }
+.recommendations-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.recommendations-head h3 { font-size: 17px; margin: 0; }
+.learning-recommendations p, .reading-suggestion span, .reading-suggestion small { color: var(--ink-soft); font-size: 12px; line-height: 1.65; }
+.reading-suggestions { display: grid; gap: 8px; margin-top: 12px; }
+.reading-suggestion { display: grid; gap: 5px; width: 100%; padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: transparent; color: var(--ink); text-align: left; cursor: pointer; overflow-wrap: anywhere; font: inherit; }
+.reading-suggestion b { font-size: 14px; }
+.reading-suggestion:hover { border-color: var(--ink-soft); }
+.reading-suggestion:focus-visible, .learning-topics summary:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+.learning-topics { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 12px; font-size: 13px; overflow-wrap: anywhere; }
+.learning-topics summary { cursor: pointer; }
+.learning-topics ul { padding-left: 18px; }
+.learning-topics li { margin: 12px 0; }
+.learning-topics li b { font-size: 13px; }
+.learning-topics .text-btn { display: inline-block; margin-top: 8px; }
 .empty-state { min-height: 520px; display: grid; align-content: center; justify-items: center; text-align: center; }
 .empty-mark { width: 74px; height: 74px; object-fit: contain; opacity: .85; }
 .empty-state h2 { margin-top: 16px; font-size: 25px; }.empty-state p { margin-top: 8px; color: var(--ink-soft); font-family: "Microsoft YaHei", sans-serif; font-size: 14px; }

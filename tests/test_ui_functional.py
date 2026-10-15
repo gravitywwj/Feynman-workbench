@@ -614,3 +614,48 @@ def test_flexible_focus_resumes_and_tools_work_in_any_order(wiki):
         assert page.request.get(f"{base_url}/api/study/focus").json()["focus"] is None
         assert not errors
         browser.close()
+
+
+@pytest.mark.ui
+def test_history_recommendations_and_wiki_brief_remain_optional(wiki):
+    question = '查询改写的边界 <img src=x onerror="alert(1)">'
+    with run_server() as base_url, sync_playwright() as playwright:
+        browser = launch_browser(playwright)
+        page = browser.new_page(viewport={"width": 1440, "height": 1000}, reduced_motion="reduce")
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        response = page.request.put(f"{base_url}/api/study/focus", data={
+            "page_path": "AI/rag/query-rewriting.md", "question": question,
+        })
+        assert response.ok
+        page.goto(base_url, wait_until="networkidle")
+        home = page.locator('#page-empty [data-recommendations]')
+        home.locator('.reading-suggestion').first.wait_for(state="visible")
+        assert "Wiki 链接" in home.inner_text()
+        home.locator('summary').click()
+        assert question in home.inner_text()
+        assert page.locator('img[onerror]').count() == 0
+        with page.expect_download() as download_info:
+            home.get_by_role('link', name='导出 Wiki 维护清单').click()
+        download = download_info.value
+        brief = wiki / download.suggested_filename
+        download.save_as(brief)
+        assert "待核查数据" in brief.read_text(encoding="utf-8")
+        page.screenshot(path=str(wiki / 'recommendations-desktop.png'), full_page=True)
+
+        suggestion = home.locator('.reading-suggestion').filter(has_text='rag-from-scratch')
+        suggestion.click()
+        page.wait_for_function("document.querySelector('#page-title').textContent === 'rag-from-scratch'")
+        rail = page.locator('#default-right-rail [data-recommendations]')
+        rail.locator('.reading-suggestion').first.wait_for(state="visible")
+        assert page.request.get(f"{base_url}/api/study/focus").json()['focus']['question'] == question
+        assert page.locator('#recall-modal').is_hidden()
+
+        page.set_viewport_size({"width": 390, "height": 844})
+        rail.scroll_into_view_if_needed()
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        rail.get_by_role('button', name='刷新推荐').click()
+        rail.locator('.reading-suggestion').first.wait_for(state="visible")
+        page.screenshot(path=str(wiki / 'recommendations-mobile.png'))
+        assert not errors
+        browser.close()
