@@ -405,7 +405,7 @@ def _reference_headings(reference: str) -> list[str]:
 
 def build_recall_brief(
     *, title: str, reference: str, note: str = "", gaps: list[str] | None = None,
-    reflections: list[str] | None = None, persona: str | None = None,
+    reflections: list[str] | None = None, persona: str | None = None, focus_question: str = "",
 ) -> dict:
     """Prepare a source-grounded first question before a recall session begins."""
     persona_key = normalize_persona(persona)
@@ -414,6 +414,8 @@ def build_recall_brief(
     reflections = [item.strip() for item in reflections or [] if item.strip()][:2]
     headings = _reference_headings(reference)
     why_bits = []
+    if focus_question:
+        why_bits.append("本次围绕你保存的具体问题回忆")
     if note.strip():
         why_bits.append("你已为这个知识点留下笔记")
     if gaps:
@@ -425,7 +427,7 @@ def build_recall_brief(
         "persona": persona_key,
         "persona_label": persona_spec["label"],
         "opening": persona_spec["intro"],
-        "question": f"不看资料，说明「{title}」具体要解决什么问题？它接收什么信息，最后得到什么结果？",
+        "question": f"不看资料，先回答本次问题：{focus_question}" if focus_question else f"不看资料，说明「{title}」具体要解决什么问题？它接收什么信息，最后得到什么结果？",
         "follow_ups": [
             f"关键机制或步骤是怎样衔接的？{('可先从「' + headings[0] + '」相关内容回忆。') if headings else ''}",
             "它在什么条件下不适用、容易出错，或需要额外验证？",
@@ -443,6 +445,7 @@ def build_recall_brief(
                 "role": "system",
                 "content": (
                     "你是个人知识库中的回忆教练。只依据给出的 Wiki 资料、学习笔记和历史盲区提出问题，"
+                    "优先围绕用户的本次学习问题选择练习范围；学习问题不作为已核实的知识事实。"
                     "不要补充资料中没有的事实。" + persona_spec["instruction"] +
                     "返回纯 JSON：{\"opening\":\"一句开场\",\"question\":\"一个具体主问题\","
                     "\"follow_ups\":[\"递进问题1\",\"递进问题2\"],\"hint\":\"不直接给答案的提示\",\"why_now\":\"一句理由\"}。"
@@ -452,6 +455,7 @@ def build_recall_brief(
                 "role": "user",
                 "content": (
                     f"知识点：{title}\n\nWiki 资料：\n{reference[:12000]}\n\n"
+                    f"本次学习问题：\n{focus_question or '（未指定）'}\n\n"
                     f"学习笔记：\n{note[:3000] or '（无）'}\n\n"
                     f"待澄清点：\n{'；'.join(gaps) or '（无）'}\n\n"
                     f"学习心得：\n{'；'.join(reflections) or '（无）'}"

@@ -86,6 +86,7 @@ def build_recall_brief(page_path: str, persona: str = "feynman") -> dict:
         reflection_rows = cur.execute(
             "SELECT content FROM reflections WHERE page_path = ? ORDER BY id DESC LIMIT 2", (page_path,)
         ).fetchall()
+        focus = cur.execute("SELECT question FROM learning_focus WHERE page_path = ?", (page_path,)).fetchone()
     return tutor.build_recall_brief(
         title=title,
         reference=reference,
@@ -93,6 +94,7 @@ def build_recall_brief(page_path: str, persona: str = "feynman") -> dict:
         gaps=[row["content"] for row in gap_rows],
         reflections=[row["content"] for row in reflection_rows],
         persona=persona,
+        focus_question=focus["question"] if focus else "",
     )
 
 
@@ -415,7 +417,7 @@ def _recommendation_candidates(*, exclude_path: str | None = None, limit: int = 
         if workspace.get("learning_goal") == "exam" and exam_days is not None:
             reasons.append(f"距考试 {exam_days} 天")
         estimated = min(22, 6 + min(open_gaps, 2) * 3 + (2 if level in {"unseen", "read"} else 0))
-        available = int(workspace.get("available_minutes") or 25)
+        available = int(workspace.get("available_minutes") or 60)
         benefit = (
             f"完成后会留下{('一次回忆表达' if level in {'unseen', 'read'} else '一次可核对的复述')}，"
             f"并把下一步缩小为{'盲区微练习' if open_gaps else '一次间隔复习'}。"
@@ -434,6 +436,64 @@ def contextual_recommendation(*, exclude_path: str | None = None) -> dict | None
     return candidates[0] if candidates else None
 
 
+def get_learning_focus() -> dict | None:
+    with db.cursor() as cur:
+        row = cur.execute("SELECT * FROM learning_focus WHERE id = 1").fetchone()
+    return dict(row) if row else None
+
+
+def _focus_reflection(cur, focus: dict) -> bool:
+    content = f"学习问题：{focus['question']}\n\n理解变化与下次起点：\n{focus['checkpoint'] or '尚未记录'}"
+    if not cur.execute(
+        "SELECT 1 FROM reflections WHERE source = 'focus' AND page_path = ? AND content = ?",
+        (focus["page_path"], content),
+    ).fetchone():
+        cur.execute(
+            "INSERT INTO reflections (page_path, page_title, source, content) VALUES (?, ?, 'focus', ?)",
+            (focus["page_path"], focus["page_title"], content),
+        )
+        return True
+    return False
+
+
+def save_learning_focus(
+    page_path: str, question: str, checkpoint: str = "", available_minutes: int = 60,
+    expected_updated_at: str | None = None,
+) -> dict:
+    question, checkpoint = question.strip(), checkpoint.strip()
+    if not question or len(question) > 300 or len(checkpoint) > 3000 or not 5 <= available_minutes <= 480:
+        raise ValueError("请填写具体学习问题，并将参考时间设为 5 到 480 分钟。")
+    meta, _ = wiki_reader.render_page_html(page_path)
+    title = meta.get("title") or page_path.rsplit("/", 1)[-1].removesuffix(".md")
+    with db.cursor() as cur:
+        cur.execute("BEGIN IMMEDIATE")
+        row = cur.execute("SELECT * FROM learning_focus WHERE id = 1").fetchone()
+        if (row["updated_at"] if row else None) != expected_updated_at:
+            raise RuntimeError("学习重点已在其他页面更新。重新载入后再保存；当前输入仍保留。")
+        if row and row["page_path"] != page_path:
+            _focus_reflection(cur, dict(row))
+        cur.execute(
+            "INSERT INTO learning_focus (id, page_path, page_title, question, checkpoint, available_minutes, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+            "page_path = excluded.page_path, page_title = excluded.page_title, question = excluded.question, "
+            "checkpoint = excluded.checkpoint, available_minutes = excluded.available_minutes, updated_at = excluded.updated_at",
+            (page_path, title, question, checkpoint, available_minutes, datetime.now().isoformat(timespec="microseconds")),
+        )
+        saved = dict(cur.execute("SELECT * FROM learning_focus WHERE id = 1").fetchone())
+    return saved
+
+
+def archive_learning_focus(expected_updated_at: str) -> dict:
+    with db.cursor() as cur:
+        cur.execute("BEGIN IMMEDIATE")
+        row = cur.execute("SELECT * FROM learning_focus WHERE id = 1").fetchone()
+        if not row or row["updated_at"] != expected_updated_at:
+            raise RuntimeError("学习重点已更新。重新载入后再归档。")
+        _focus_reflection(cur, dict(row))
+        cur.execute("DELETE FROM learning_focus WHERE id = 1")
+    return {"focus": None, "message": "已保存到学习心得，可以开始下一个问题。"}
+
+
 def today_action() -> dict:
     """Return one transparent action based on evidence and user-supplied study context."""
     workspace = config.get_workspace_settings()
@@ -442,12 +502,27 @@ def today_action() -> dict:
             "type": "configure", "title": "先连接你的学习资料",
             "detail": "选择一个包含 pages 的本地 Wiki，或先用两分钟示例体验一次回忆表达。",
         }
+    focus = get_learning_focus()
+    if focus and any(item["path"] == focus["page_path"] for item in wiki_reader.scan_concepts()):
+        return {
+            "type": "focus", "title": focus["question"], "page_path": focus["page_path"],
+            "detail": focus["checkpoint"] or "继续阅读、回忆或应用，按这个问题的进展决定下一步。",
+            "estimated_minutes": focus["available_minutes"], "reason": "saved_learning_focus",
+        }
     due_cards = list_due_cards(1)
     if due_cards:
         summary = review_summary()
+        if not summary["today_plan_count"]:
+            return {
+                "type": "review_complete", "title": "今天的复习计划已完成",
+                "detail": f"今天已完成 {summary['completed']} 张。让记忆先间隔，明天再继续。",
+                "reason": "daily_review_goal_reached", "estimated_minutes": 0,
+                "benefit": "已完成的卡片会按本次判断安排下一次回忆。",
+            }
+        next_minutes = summary["next_card_estimated_minutes"] or 2
         return {
-            "type": "review", "title": "完成今天的间隔复习",
-            "detail": f"今天目标 {summary['goal']} 张，已完成 {summary['completed']} 张；还有 {summary['total']} 张需要回忆。",
+            "type": "review", "title": "先完成今天的下一张复习",
+            "detail": f"今天计划 {summary['today_plan_count'] + summary['completed']} 张，已完成 {summary['completed']} 张。先用约 {next_minutes} 分钟完成这一张。",
             "reason": "scheduled_review", "estimated_minutes": min(summary["estimated_minutes"], workspace["available_minutes"]),
             "benefit": "完成后会更新间隔安排，并为保持状态留下新的回忆证据。",
         }
@@ -561,10 +636,17 @@ def review_summary() -> dict:
         completed = cur.execute(
             "SELECT COUNT(*) FROM reviews WHERE substr(reviewed_at, 1, 10) = ?", (today_text,)
         ).fetchone()[0]
+    goal = settings["daily_review_goal"]
+    remaining_goal = max(0, goal - completed)
+    today_plan = cards[:remaining_goal]
     return {
         "total": len(cards),
         "completed": completed,
-        "goal": settings["daily_review_goal"],
+        "goal": goal,
+        "remaining_goal": remaining_goal,
+        "today_plan_count": len(today_plan),
+        "today_plan_estimated_minutes": sum(card["estimated_minutes"] for card in today_plan),
+        "next_card_estimated_minutes": today_plan[0]["estimated_minutes"] if today_plan else None,
         "estimated_minutes": sum(card["estimated_minutes"] for card in cards),
         "cards": cards,
         "has_evidence": bool(cards or completed),
@@ -1072,14 +1154,14 @@ def export_learning_data() -> dict:
     tables = (
         "notes", "reflections", "sessions", "turns", "gaps", "cards", "reviews",
         "review_attempts", "learning_events", "diagnosis_feedback", "knowledge_updates", "self_assessments",
-        "wiki_revisions", "practice_attempts",
+        "wiki_revisions", "practice_attempts", "learning_focus",
     )
     with db.cursor() as cur:
         payload = {
             table: db.rows_to_dicts(cur.execute(f"SELECT * FROM {table} ORDER BY {'page_path' if table == 'self_assessments' else 'id'}").fetchall())
             for table in tables
         }
-    return {"format": "feynman-workbench-export", "version": 6, "exported_at": datetime.now().isoformat(timespec="seconds"), **payload}
+    return {"format": "feynman-workbench-export", "version": 7, "exported_at": datetime.now().isoformat(timespec="seconds"), **payload}
 
 
 def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
@@ -1091,20 +1173,37 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
     """
     if payload.get("format") != "feynman-workbench-export":
         raise ValueError("这不是费曼学习工作台导出的学习数据")
-    if payload.get("version") not in {1, 2, 3, 4, 5, 6}:
+    if payload.get("version") not in {1, 2, 3, 4, 5, 6, 7}:
         raise ValueError("暂不支持该导出版本")
     names = (
         "notes", "reflections", "sessions", "turns", "gaps", "cards", "reviews",
         "review_attempts", "learning_events", "diagnosis_feedback", "knowledge_updates", "self_assessments",
-        "wiki_revisions", "practice_attempts",
+        "wiki_revisions", "practice_attempts", "learning_focus",
     )
     source = {name: payload.get(name, []) for name in names}
     if any(not isinstance(value, list) for value in source.values()):
         raise ValueError("导出数据的结构不正确")
+    focus_rows = source["learning_focus"]
+    if len(focus_rows) > 1:
+        raise ValueError("备份中只能有一个当前学习重点。")
+    if focus_rows:
+        focus = focus_rows[0]
+        limits = {"page_path": 2000, "page_title": 2000, "question": 300, "checkpoint": 3000, "updated_at": 40}
+        if not isinstance(focus, dict) or any(
+            not isinstance(focus.get(key), str) or len(focus[key]) > limit
+            or (key != "checkpoint" and not focus[key].strip()) for key, limit in limits.items()
+        ):
+            raise ValueError("备份中的学习问题或断点格式不正确。")
+        if type(focus.get("available_minutes")) is not int or not 5 <= focus["available_minutes"] <= 480:
+            raise ValueError("备份中的参考时间应为 5 到 480 分钟。")
+        try:
+            datetime.fromisoformat(focus["updated_at"])
+        except ValueError:
+            raise ValueError("备份中的学习重点更新时间不正确。") from None
     counts = {
         "notes": 0, "reflections": 0, "sessions": 0, "cards": 0, "events": 0,
         "knowledge_updates": 0, "wiki_revisions": 0, "self_assessments": 0,
-        "practice_attempts": 0,
+        "practice_attempts": 0, "learning_focus": 0,
     }
     with db.cursor() as cur:
         practice_preview = practice_sessions.import_preview(cur, source["practice_attempts"])
@@ -1331,6 +1430,19 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
         imported_practice = practice_sessions.import_attempts(cur, source["practice_attempts"])
         counts["practice_attempts"] = imported_practice["attempts"]
         counts["events"] += imported_practice["events"]
+        if focus_rows:
+            focus = focus_rows[0]
+            current = cur.execute("SELECT * FROM learning_focus WHERE id = 1").fetchone()
+            if not current:
+                cur.execute(
+                    "INSERT INTO learning_focus (id, page_path, page_title, question, checkpoint, available_minutes, updated_at) "
+                    "VALUES (1, ?, ?, ?, ?, ?, ?)",
+                    tuple(focus[key] for key in ("page_path", "page_title", "question", "checkpoint", "available_minutes", "updated_at")),
+                )
+                counts["learning_focus"] = 1
+            elif any(current[key] != focus[key] for key in ("page_path", "question", "checkpoint")):
+                # Keep the current problem; recover a conflicting checkpoint in the existing reflection history.
+                counts["reflections"] += int(_focus_reflection(cur, focus))
     return {"dry_run": False, "imported": counts, "message": "已合并导入数据，当前设备既有记录未被删除。"}
 
 
@@ -1505,6 +1617,7 @@ def list_orphaned_records() -> list[dict]:
             "UNION ALL SELECT target_path, page_title, updated_at AS last_activity FROM knowledge_updates WHERE target_path IS NOT NULL"
             " UNION ALL SELECT page_path, page_path AS page_title, updated_at AS last_activity FROM self_assessments"
             " UNION ALL SELECT page_path, page_title, COALESCE(submitted_at, created_at) AS last_activity FROM practice_attempts"
+            " UNION ALL SELECT page_path, page_title, updated_at AS last_activity FROM learning_focus"
             ") GROUP BY page_path"
         ).fetchall()
     orphaned = []
@@ -1528,8 +1641,9 @@ def relink_page(old_path: str, new_path: str) -> dict:
             "SELECT EXISTS(SELECT 1 FROM sessions WHERE page_path = ?) OR EXISTS(SELECT 1 FROM notes WHERE page_path = ?) "
             "OR EXISTS(SELECT 1 FROM reflections WHERE page_path = ?) OR EXISTS(SELECT 1 FROM knowledge_updates WHERE page_path = ?) "
             "OR EXISTS(SELECT 1 FROM knowledge_updates WHERE target_path = ?) OR EXISTS(SELECT 1 FROM wiki_revisions WHERE page_path = ?) "
-            "OR EXISTS(SELECT 1 FROM self_assessments WHERE page_path = ?) OR EXISTS(SELECT 1 FROM practice_attempts WHERE page_path = ?)",
-            (old_path, old_path, old_path, old_path, old_path, old_path, old_path, old_path),
+            "OR EXISTS(SELECT 1 FROM self_assessments WHERE page_path = ?) OR EXISTS(SELECT 1 FROM practice_attempts WHERE page_path = ?) "
+            "OR EXISTS(SELECT 1 FROM learning_focus WHERE page_path = ?)",
+            (old_path, old_path, old_path, old_path, old_path, old_path, old_path, old_path, old_path),
         ).fetchone()[0]
         if not has_records:
             raise LookupError("旧页面没有可重新关联的学习记录。")
@@ -1549,4 +1663,8 @@ def relink_page(old_path: str, new_path: str) -> dict:
             (new_path, title, old_path),
         )
         cur.execute("UPDATE learning_events SET page_path = ? WHERE page_path = ?", (new_path, old_path))
+        cur.execute(
+            "UPDATE learning_focus SET page_path = ?, page_title = ?, updated_at = ? WHERE page_path = ?",
+            (new_path, title, datetime.now().isoformat(timespec="microseconds"), old_path),
+        )
     return {"old_path": old_path, "new_path": new_path, "title": title}

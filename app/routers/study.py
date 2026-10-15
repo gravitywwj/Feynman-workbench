@@ -26,6 +26,18 @@ class NoteSave(BaseModel):
     content: str = Field(max_length=10000)
 
 
+class LearningFocusSave(BaseModel):
+    page_path: str = Field(min_length=1, max_length=2000)
+    question: str = Field(min_length=1, max_length=300)
+    checkpoint: str = Field(default="", max_length=3000)
+    available_minutes: int = Field(default=60, ge=5, le=480)
+    expected_updated_at: str | None = Field(default=None, max_length=40)
+
+
+class LearningFocusArchive(BaseModel):
+    expected_updated_at: str = Field(min_length=1, max_length=40)
+
+
 class RecallBriefCreate(BaseModel):
     page_path: str
     persona: str = Field(default="feynman", pattern="^(feynman|direct|exam|reflective)$")
@@ -92,7 +104,7 @@ class WorkspaceSettingsSave(BaseModel):
     daily_review_goal: int = Field(default=5, ge=1, le=50)
     learning_goal: str = Field(default="long_term", pattern="^(exam|presentation|long_term)$")
     exam_date: str = Field(default="", max_length=10)
-    available_minutes: int = Field(default=25, ge=5, le=480)
+    available_minutes: int = Field(default=60, ge=5, le=480)
     section_weights: dict[str, int] = Field(default_factory=dict)
 
 
@@ -155,6 +167,29 @@ def home_action() -> dict:
 @router.get("/today-summary")
 def today_summary() -> dict:
     return study_sessions.today_study_summary()
+
+
+@router.get("/focus")
+def learning_focus() -> dict:
+    return {"focus": study_sessions.get_learning_focus()}
+
+
+@router.put("/focus")
+def save_learning_focus(payload: LearningFocusSave) -> dict:
+    try:
+        return {"focus": study_sessions.save_learning_focus(**payload.model_dump())}
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/focus/archive")
+def archive_learning_focus(payload: LearningFocusArchive) -> dict:
+    try:
+        return study_sessions.archive_learning_focus(payload.expected_updated_at)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 @router.get("/workspace")

@@ -353,7 +353,7 @@ def test_backup_versions_regrade_dedupe_and_reject_uid_conflicts(wiki, monkeypat
     transfer = start_attempt(linked_page, "metrics-transfer")
     submit(transfer["attempt_uid"], expected_for("metrics-transfer"))
     exported = export_learning_data()
-    assert exported["version"] == 6 and exported["practice_attempts"]
+    assert exported["version"] == 7 and exported["practice_attempts"]
     assert next(item for item in exported["practice_attempts"] if item["attempt_uid"] == transfer["attempt_uid"])["precursor_uid"] == application["attempt_uid"]
 
     roundtrip_db = wiki / "roundtrip.db"

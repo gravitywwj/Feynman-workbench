@@ -155,9 +155,9 @@ def get_workspace_settings() -> dict:
     except ValueError:
         exam_date = ""
     try:
-        available_minutes = min(480, max(5, int(stored.get("available_minutes", 25))))
+        available_minutes = min(480, max(5, int(stored.get("available_minutes", 60))))
     except (TypeError, ValueError):
-        available_minutes = 25
+        available_minutes = 60
     raw_weights = stored.get("section_weights", {})
     section_weights = {}
     if isinstance(raw_weights, dict):
@@ -186,7 +186,7 @@ def get_workspace_settings() -> dict:
 
 def save_workspace_settings(
     *, mode: str, wiki_path: str | None, diagnostic_mode: str, daily_review_goal: int, learning_goal: str = "long_term",
-    exam_date: str = "", available_minutes: int = 25, section_weights: dict[str, int] | None = None,
+    exam_date: str = "", available_minutes: int = 60, section_weights: dict[str, int] | None = None,
 ) -> dict:
     """Persist user choices. An explicit environment path remains deployment authority."""
     if mode not in {"local", "demo"}:

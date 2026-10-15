@@ -10,6 +10,7 @@ const state = {
   librarySort: 'default',
   libraryStatus: 'all',
   workspace: null,
+  focus: null,
   practiceOpen: false,
   practiceView: 'local',
   practiceTasks: [],
@@ -54,13 +55,8 @@ function playEntryMotion(element, className = 'content-enter') {
   element.addEventListener('animationend', () => element.classList.remove(className), { once: true });
 }
 
-/* ===== 顶栏：步骤高亮 ===== */
+/* ===== 回忆工具内的提示 ===== */
 function setStep(n) {
-  document.querySelectorAll('.step').forEach(el => {
-    const active = +el.dataset.step === n;
-    el.classList.toggle('active', active);
-    el.setAttribute('aria-current', active ? 'step' : 'false');
-  });
   document.querySelectorAll('[data-guide-step]').forEach(el => {
     el.classList.toggle('active', +el.dataset.guideStep === n);
   });
@@ -71,6 +67,7 @@ async function loadConcepts() {
   try {
     const data = await api('/api/concepts');
     state.concepts = data.concepts;
+    await loadLearningFocus();
     document.getElementById('concept-count').textContent = data.total + ' 页';
     renderTree();
     loadRecentNotes();
@@ -106,11 +103,12 @@ async function loadHomeAction() {
   const alternative = document.getElementById('btn-home-alternative');
   try {
     const action = await api('/api/study/home');
+    document.getElementById('page-empty').classList.toggle('focus-home', action.type === 'focus');
     setHomeDashboardVisible(!state.selected);
     title.textContent = action.title;
     detail.textContent = action.detail;
     button.disabled = action.type === 'empty';
-    button.textContent = { configure: '连接资料或体验示例', review: '开始今日复习', continue: '继续这次学习', start: '开始这个概念', empty: '等待 Wiki 内容' }[action.type] || '开始学习';
+    button.textContent = { configure: '连接资料或体验示例', focus: '继续这个问题', review: '先完成这一张', review_complete: '查看复习安排', continue: '继续这次学习', start: '开始这个概念', empty: '等待 Wiki 内容' }[action.type] || '开始学习';
     alternative.classList.toggle('hidden', !(action.type === 'start' && action.alternatives?.length));
     playEntryMotion(document.getElementById('page-empty'));
     alternative.onclick = () => {
@@ -125,7 +123,7 @@ async function loadHomeAction() {
     };
     button.onclick = async () => {
       if (action.type === 'configure') return openWorkspace();
-      if (action.type === 'review') return openReviewPlan('scheduled');
+      if (action.type === 'review' || action.type === 'review_complete') return openReviewPlan('scheduled');
       if (action.page_path) await selectConcept(action.page_path);
       if (action.type === 'continue') openRecall('simplify', action.session_id);
     };
@@ -480,6 +478,7 @@ async function selectConcept(path) {
   try {
     const { meta, html } = await api('/api/concepts/page?path=' + encodeURIComponent(path));
     state.currentMeta = meta;
+    renderLearningFocus();
     document.getElementById('page-empty').classList.add('hidden');
     document.getElementById('page-content').classList.remove('hidden');
     document.getElementById('page-title').textContent = meta.title;
@@ -515,6 +514,125 @@ function storageGet(key) {
 
 function storageSet(key, value) {
   try { localStorage.setItem(key, value); } catch (e) { console.warn('无法保存本地学习记录', e); }
+}
+
+/* ===== 可跨天接续的学习重点 ===== */
+let focusEditingPath = null;
+let focusExpectedAt = null;
+
+function focusDraftKey(path) {
+  return `feynman-focus:${state.workspace?.wiki_path || ''}:${path}`;
+}
+
+function renderLearningFocus() {
+  const focus = state.focus;
+  const available = focus && state.concepts.some(item => item.path === focus.page_path);
+  document.getElementById('focus-question').textContent = focus?.question || '围绕一个具体问题学习';
+  document.getElementById('focus-checkpoint').textContent = focus
+    ? `${focus.page_title} · ${focus.checkpoint || '可以先阅读示例，也可以直接回忆或应用。'}`
+    : '选定资料，记录要弄清的问题；结束时留下理解变化和下次起点。';
+  document.getElementById('focus-budget').textContent = focus ? `参考约 ${focus.available_minutes} 分钟，可调整` : '时间按问题进展调整';
+  document.getElementById('btn-focus-edit').disabled = !state.selected && !available;
+  document.getElementById('btn-focus-return').classList.toggle('hidden', !available || !state.selected || state.selected.path === focus.page_path);
+  document.getElementById('btn-focus-current').classList.toggle('hidden', !focus || !state.selected || state.selected.path === focus.page_path);
+  document.getElementById('btn-focus-archive').classList.toggle('hidden', !focus);
+  document.querySelectorAll('[data-study-tool]').forEach(button => { button.disabled = !state.selected && !available; });
+}
+
+async function loadLearningFocus() {
+  try {
+    const data = await api('/api/study/focus');
+    state.focus = data.focus;
+    renderLearningFocus();
+  } catch (e) {
+    document.getElementById('focus-status').textContent = `学习重点暂不可用：${e.message}`;
+  }
+}
+
+function editLearningFocus(useCurrentPage = false) {
+  const focus = state.focus;
+  focusEditingPath = useCurrentPage ? state.selected?.path : focus?.page_path || state.selected?.path;
+  if (!focusEditingPath) return;
+  focusExpectedAt = focus?.updated_at || null;
+  let draft = null;
+  try { draft = JSON.parse(storageGet(focusDraftKey(focusEditingPath))); } catch { /* No saved draft. */ }
+  const saved = focus?.page_path === focusEditingPath ? focus : null;
+  document.getElementById('focus-editor-topic').textContent = `关联资料：${state.concepts.find(item => item.path === focusEditingPath)?.title || focusEditingPath}`;
+  document.getElementById('focus-question-input').value = draft?.question ?? saved?.question ?? '';
+  document.getElementById('focus-checkpoint-input').value = draft?.checkpoint ?? saved?.checkpoint ?? '';
+  document.getElementById('focus-minutes').value = draft?.available_minutes ?? saved?.available_minutes ?? state.workspace?.available_minutes ?? 60;
+  document.getElementById('focus-form').classList.remove('hidden');
+  document.getElementById('focus-status').textContent = useCurrentPage && focus && !saved
+    ? '保存后，上一页的问题与断点会保留到学习心得。'
+    : '输入草稿保存在此浏览器；保存后进入本地学习库和数据备份。';
+  document.getElementById('focus-question-input').focus();
+}
+
+function learningFocusDraft() {
+  return {
+    question: document.getElementById('focus-question-input').value,
+    checkpoint: document.getElementById('focus-checkpoint-input').value,
+    available_minutes: Number(document.getElementById('focus-minutes').value),
+  };
+}
+
+async function saveLearningFocus(event) {
+  event.preventDefault();
+  const button = document.getElementById('btn-focus-save');
+  const status = document.getElementById('focus-status');
+  button.disabled = true;
+  try {
+    const data = await api('/api/study/focus', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...learningFocusDraft(), page_path: focusEditingPath, expected_updated_at: focusExpectedAt }),
+    });
+    storageSet(focusDraftKey(focusEditingPath), '');
+    state.focus = data.focus;
+    document.getElementById('focus-form').classList.add('hidden');
+    renderLearningFocus();
+    status.textContent = '重点与断点已保存，之后可继续这个问题。';
+    loadHomeAction();
+  } catch (e) { status.textContent = e.message; }
+  finally { button.disabled = false; }
+}
+
+async function archiveLearningFocus() {
+  const status = document.getElementById('focus-status');
+  if (!document.getElementById('focus-form').classList.contains('hidden')) {
+    status.textContent = '先保存编辑中的问题与断点，再归档。';
+    return;
+  }
+  if (storageGet(focusDraftKey(state.focus.page_path))) {
+    status.textContent = '还有编辑草稿，先打开并保存问题与断点，再归档。';
+    return;
+  }
+  const button = document.getElementById('btn-focus-archive');
+  button.disabled = true;
+  try {
+    const result = await api('/api/study/focus/archive', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expected_updated_at: state.focus.updated_at }),
+    });
+    storageSet(focusDraftKey(state.focus.page_path), '');
+    state.focus = null;
+    renderLearningFocus();
+    status.textContent = result.message;
+    loadHomeAction();
+  } catch (e) { status.textContent = e.message; }
+  finally { button.disabled = false; }
+}
+
+async function useStudyTool(tool) {
+  if (!state.selected && state.focus) await selectConcept(state.focus.page_path);
+  if (!state.selected) return;
+  if (tool === 'recall') openRecall();
+  if (tool === 'practice') openPracticePanel();
+  if (tool === 'notes') openNotes();
+  if (tool === 'read') {
+    document.getElementById('page-body').classList.add('expanded');
+    document.getElementById('btn-toggle-reference').textContent = '收起完整资料';
+    document.getElementById('page-body').scrollIntoView({ block: 'start' });
+  }
 }
 
 function loadReadingSettings() {
@@ -1169,7 +1287,7 @@ function ensureReflectionTab() {
 }
 
 function reflectionSourceLabel(source) {
-  return { manual: '手写心得', session: '学习后记录', summary: '阶段总结' }[source] || '学习心得';
+  return { manual: '手写心得', session: '学习后记录', focus: '学习问题与断点', summary: '阶段总结' }[source] || '学习心得';
 }
 
 function reflectionDraftValue() {
@@ -2600,7 +2718,23 @@ let reviewAgent = 'feynman';
 function reviewModeCopy(mode) {
   return mode === 'cram'
     ? '从已学习内容中优先挑出到期、较少复习或即将到期的卡片。适合考前快速抽查。'
-    : '仅显示今天到期的卡片。完成后，下一次日期会按你的评分调整。';
+    : '一次只做一张。完成后再决定是否继续，下一次日期会按你的评分调整。';
+}
+
+function scheduledPlanCount(summary) {
+  return Number(summary.completed || 0) + Number(summary.today_plan_count || 0);
+}
+
+function renderReviewProgress(summary, mode) {
+  const progress = document.getElementById('review-progress');
+  if (mode === 'cram') {
+    progress.textContent = '突击检查 · 现在只做一张，完成后再决定是否继续。';
+    return;
+  }
+  const planCount = scheduledPlanCount(summary);
+  progress.textContent = planCount
+    ? `今天计划 ${planCount} 张，已完成 ${summary.completed} 张。现在只做下一张，约 ${summary.next_card_estimated_minutes || 2} 分钟。`
+    : `今天已完成 ${summary.completed} 张。让记忆先间隔，明天再继续。`;
 }
 
 function renderReviewCards(cards) {
@@ -2654,20 +2788,58 @@ async function openReviewPlan(mode = reviewMode) {
   });
   document.getElementById('review-mode-description').textContent = reviewModeCopy(reviewMode);
   try {
-    const [data, summary] = await Promise.all([
-      api(`/api/study/reviews/queue?mode=${reviewMode}`), api('/api/study/reviews/summary'),
-    ]);
-    document.getElementById('review-progress').textContent = `今日目标 ${summary.goal} 张，已完成 ${summary.completed} 张，待处理 ${summary.total} 张，预计 ${summary.estimated_minutes} 分钟。`;
+    const summary = await api('/api/study/reviews/summary');
+    const planIsComplete = reviewMode === 'scheduled' && !summary.today_plan_count;
+    const data = planIsComplete
+      ? { total: 0, cards: [] }
+      : await api(`/api/study/reviews/queue?mode=${reviewMode}&limit=1`);
+    renderReviewProgress(summary, reviewMode);
     hint.textContent = data.total
-      ? `${reviewMode === 'cram' ? '已选出' : '今天有'} ${data.total} 张卡。先作答，再选择教练核对。`
-      : reviewMode === 'cram' ? '还没有可突击检查的学习记录。' : '今天没有到期卡。';
+      ? reviewMode === 'cram'
+        ? '先完成这一张，再决定是否继续抽查。'
+        : '先完成这一张。每一张结束后，都由你决定是否继续。'
+      : reviewMode === 'cram'
+        ? '还没有可突击检查的学习记录。先完成一次费曼回顾。'
+        : summary.total
+          ? '今天的计划已完成。其余复习会留在之后的安排中。'
+          : '今天没有到期卡。完成学习后，第一次复习会在隔天出现。';
     renderReviewCards(data.cards);
   } catch (e) {
     hint.textContent = `暂时无法读取复习计划：${e.message}`;
   }
 }
 
+function closeReviewPlan() {
+  document.getElementById('review-modal').classList.add('hidden');
+  loadHomeAction();
+  loadReviewReminder();
+}
+
+async function showReviewPause(result) {
+  const hint = document.getElementById('review-modal-hint');
+  const stack = document.getElementById('review-card-stack');
+  const summary = await api('/api/study/reviews/summary');
+  const canContinue = reviewMode === 'cram' || summary.today_plan_count > 0;
+  renderReviewProgress(summary, reviewMode);
+  hint.textContent = '这一张已经完成。现在由你决定下一步。';
+  stack.innerHTML = `
+    <section class="review-next-action" aria-live="polite">
+      <p class="eyebrow">已完成这一张</p>
+      <h3>${canContinue ? '要继续下一张吗？' : '今天的计划已经完成'}</h3>
+      <p>${esc(result.next_review_reason)}。${canContinue ? '继续时只会打开下一张卡。' : '让记忆先间隔，明天再继续。'}</p>
+      <div class="review-next-actions">
+        ${canContinue ? '<button class="btn btn-primary" type="button" data-review-action="next">继续下一张</button>' : ''}
+        <button class="btn btn-quiet" type="button" data-review-action="finish">今天先到这里</button>
+      </div>
+    </section>`;
+}
+
 document.getElementById('review-card-stack').addEventListener('click', async (e) => {
+  const planAction = e.target.closest('[data-review-action]');
+  if (planAction) {
+    if (planAction.dataset.reviewAction === 'next') return openReviewPlan(reviewMode);
+    return closeReviewPlan();
+  }
   const item = e.target.closest('.review-item');
   if (!item) return;
   const sourceButton = e.target.closest('.review-open-source');
@@ -2724,11 +2896,7 @@ document.getElementById('review-card-stack').addEventListener('click', async (e)
     const result = await api(`/api/study/reviews/${item.dataset.cardId}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rating }),
     });
-    item.remove();
-    const remaining = document.querySelectorAll('#review-card-stack .review-item').length;
-    document.getElementById('review-modal-hint').textContent = remaining ? `还剩 ${remaining} 张卡。${result.next_review_reason}` : `本轮复习完成。${result.next_review_reason}`;
-    if (!remaining) document.getElementById('review-card-stack').innerHTML = '<p class="review-empty">今日复习已完成。</p>';
-    loadReviewReminder();
+    await showReviewPause(result);
   } catch (err) {
     item.querySelectorAll('button').forEach(button => { button.disabled = false; });
   }
@@ -2784,7 +2952,7 @@ async function importLearningFile(file) {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ payload }),
     });
     const incoming = preview.incoming;
-    const message = `将合并 ${incoming.sessions} 个会话、${incoming.notes} 条笔记、${incoming.reflections || 0} 条心得和 ${incoming.cards} 张复习卡。当前记录不会被删除。确认导入吗？`;
+    const message = `将合并 ${incoming.sessions} 个会话、${incoming.notes} 条笔记、${incoming.reflections || 0} 条心得、${incoming.cards} 张复习卡和 ${incoming.learning_focus || 0} 个学习重点。已有其他重点时，备份中的断点保留到心得。确认导入吗？`;
     if (!window.confirm(message)) { hint.textContent = '已取消导入。'; return; }
     const result = await api('/api/study/import', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ payload }),
@@ -2978,7 +3146,7 @@ async function openWorkspace() {
   document.getElementById('daily-review-goal').value = workspace.daily_review_goal;
   document.querySelector(`input[name="learning-goal"][value="${workspace.learning_goal || 'long_term'}"]`).checked = true;
   document.getElementById('exam-date').value = workspace.exam_date || '';
-  document.getElementById('available-minutes').value = workspace.available_minutes || 25;
+  document.getElementById('available-minutes').value = workspace.available_minutes || 60;
   renderSectionWeights(workspace.section_weights || {});
   document.getElementById('workspace-status').textContent = workspace.uses_environment_path
     ? '当前 Wiki 由启动环境指定，保存的路径会在下次未指定环境变量时生效。'
@@ -3061,6 +3229,21 @@ async function saveWorkspace() {
 }
 
 /* ===== 事件绑定 ===== */
+document.getElementById('btn-focus-edit').addEventListener('click', () => editLearningFocus());
+document.getElementById('btn-focus-current').addEventListener('click', () => editLearningFocus(true));
+document.getElementById('btn-focus-return').addEventListener('click', () => selectConcept(state.focus.page_path));
+document.getElementById('btn-focus-archive').addEventListener('click', archiveLearningFocus);
+document.getElementById('focus-form').addEventListener('submit', saveLearningFocus);
+document.getElementById('focus-form').addEventListener('input', () => {
+  if (focusEditingPath) storageSet(focusDraftKey(focusEditingPath), JSON.stringify(learningFocusDraft()));
+});
+document.getElementById('btn-focus-cancel').addEventListener('click', () => {
+  document.getElementById('focus-form').classList.add('hidden');
+  document.getElementById('focus-status').textContent = '编辑草稿已保留在此浏览器。';
+});
+document.querySelectorAll('[data-study-tool]').forEach(button => {
+  button.addEventListener('click', () => useStudyTool(button.dataset.studyTool));
+});
 document.getElementById('search-input').addEventListener('input', renderTree);
 document.getElementById('library-sort').addEventListener('change', (event) => {
   state.librarySort = event.target.value;
@@ -3361,10 +3544,10 @@ document.getElementById('btn-review-start').addEventListener('click', () => {
   openReviewPlan();
 });
 document.getElementById('btn-close-review').addEventListener('click', () => {
-  document.getElementById('review-modal').classList.add('hidden');
+  closeReviewPlan();
 });
 document.getElementById('review-modal').addEventListener('click', (e) => {
-  if (e.target.id === 'review-modal') document.getElementById('review-modal').classList.add('hidden');
+  if (e.target.id === 'review-modal') closeReviewPlan();
 });
 
 document.getElementById('btn-graph-settings').addEventListener('click', () => {
@@ -3469,8 +3652,7 @@ document.getElementById('diagnosis-feedback').addEventListener('click', (e) => {
 });
 
 /* ===== 启动 ===== */
-loadWorkspace();
-loadConcepts();
+loadWorkspace().then(loadConcepts);
 bindGraphEvents();
 applyReadingSettings();
 setupVoiceRecall();

@@ -46,6 +46,16 @@ CREATE TABLE IF NOT EXISTS reflections (
     updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
+CREATE TABLE IF NOT EXISTS learning_focus (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    page_path TEXT NOT NULL,
+    page_title TEXT NOT NULL,
+    question TEXT NOT NULL,
+    checkpoint TEXT NOT NULL DEFAULT '',
+    available_minutes INTEGER NOT NULL DEFAULT 60 CHECK (available_minutes BETWEEN 5 AND 480),
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS knowledge_updates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     page_path TEXT NOT NULL,

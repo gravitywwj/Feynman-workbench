@@ -206,6 +206,37 @@ def test_mobile_primary_action_is_not_clipped(wiki):
 
 
 @pytest.mark.ui
+def test_review_plan_starts_with_one_card_and_pauses_after_rating(wiki):
+
+    from app import db
+    from app.services import study_sessions
+
+    study_sessions.create_session(
+        "AI/rag/query-rewriting.md",
+        "查询改写会补足对象、场景和约束条件，让检索返回更贴近任务的资料。例如把模糊问题改成包含上下文的查询。",
+    )
+    with db.cursor() as cur:
+        cur.execute("UPDATE cards SET due = date('now', 'localtime', '-1 day')")
+
+    with run_server() as base_url, sync_playwright() as playwright:
+        browser = launch_browser(playwright)
+        page = browser.new_page()
+        page.goto(base_url, wait_until="networkidle")
+        page.get_by_role("button", name="复习模块", exact=True).click()
+        page.locator("#review-modal").wait_for(state="visible")
+        assert page.locator(".review-item").count() == 1
+        assert "现在只做下一张" in page.locator("#review-progress").inner_text()
+
+        review = page.locator(".review-item")
+        review.get_by_role("button", name="查看 Wiki 参考与必备要点").click()
+        review.get_by_role("button", name="记得住").click()
+        page.get_by_text("已完成这一张", exact=True).wait_for(state="visible")
+        assert page.get_by_role("button", name="继续下一张").is_visible()
+        assert page.locator(".review-item").count() == 0
+        browser.close()
+
+
+@pytest.mark.ui
 def test_home_workspace_panels_share_height_and_concept_switch_animates(wiki):
     with run_server() as base_url, sync_playwright() as playwright:
         browser = launch_browser(playwright)
@@ -375,7 +406,8 @@ def test_application_practice_flow_and_visual_evidence(wiki, monkeypatch):
     metrics = next(task for task in practice_sessions.TASKS if task["task_key"] == "metrics-apply")["expected"]
     validation = next(task for task in practice_sessions.TASKS if task["task_key"] == "validation-apply")["expected"]
     wrong_metrics = dict(metrics, tp=0)
-    screenshots = Path(__file__).resolve().parents[1] / "audit" / "learning-validation-2026-10-12" / "screenshots"
+    # Regression captures must not overwrite dated audit evidence.
+    screenshots = wiki / "practice-screenshots"
     screenshots.mkdir(parents=True, exist_ok=True)
 
     with run_server() as base_url, sync_playwright() as playwright:
@@ -519,4 +551,65 @@ def test_application_practice_flow_and_visual_evidence(wiki, monkeypatch):
         page.screenshot(path=str(screenshots / "10-no-adapted-local-task.png"), full_page=True)
         page.locator('[data-practice-view="external"]').click()
         assert page.get_by_role("button", name="保存自报记录").is_visible()
+        browser.close()
+
+
+@pytest.mark.ui
+def test_flexible_focus_resumes_and_tools_work_in_any_order(wiki):
+    with run_server() as base_url, sync_playwright() as playwright:
+        browser = launch_browser(playwright)
+        page = browser.new_page(viewport={"width": 1440, "height": 1000}, reduced_motion="reduce")
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.goto(f"{base_url}/?path=AI/rag/query-rewriting.md", wait_until="networkidle")
+        page.locator("#page-content").wait_for(state="visible")
+        page.locator("#btn-focus-edit").click()
+        page.locator("#focus-question-input").fill("什么情况下应该保留原查询？")
+        page.locator("#focus-checkpoint-input").fill("已分清改写的目标；下次比较两个检索结果。")
+        assert page.locator("#focus-minutes").input_value() == "60"
+        with page.expect_response(lambda response: response.request.method == "PUT" and response.url.endswith("/api/study/focus")):
+            page.locator("#btn-focus-save").click()
+        page.locator("#focus-form").wait_for(state="hidden")
+
+        # Applying or reading does not require completing a recall stage first.
+        page.locator('[data-study-tool="practice"]').click()
+        page.locator("#practice-panel").wait_for(state="visible")
+        assert page.locator("#recall-modal").is_hidden()
+        page.locator('[data-study-tool="read"]').click()
+        assert page.locator("#page-body").evaluate("node => node.classList.contains('expanded')")
+        page.locator('[data-study-tool="notes"]').click()
+        page.locator("#notes-modal").wait_for(state="visible")
+        page.locator("#btn-close-notes").click()
+        page.locator('[data-study-tool="recall"]').click()
+        page.wait_for_function("document.querySelector('#recall-question').textContent.includes('什么情况下应该保留原查询？')")
+        page.locator("#btn-close-recall").click()
+
+        page.goto(base_url, wait_until="networkidle")
+        assert "什么情况下应该保留原查询？" in page.locator("#home-action-title").inner_text()
+        assert page.locator("#btn-home-action").bounding_box()["y"] < 1000
+        page.locator("#btn-home-action").click()
+        page.locator("#page-content").wait_for(state="visible")
+        assert "下次比较两个检索结果" in page.locator("#focus-checkpoint").inner_text()
+        page.locator("#btn-focus-edit").click()
+        page.locator("#focus-minutes").fill("180")
+        page.locator("#focus-checkpoint-input").fill("周末继续深入，先检验改写丢失约束的情况。")
+        page.reload(wait_until="networkidle")
+        page.locator("#btn-focus-edit").click()
+        assert page.locator("#focus-minutes").input_value() == "180"
+        assert "周末继续深入" in page.locator("#focus-checkpoint-input").input_value()
+        page.locator("#btn-focus-save").click()
+        page.wait_for_function("document.querySelector('#focus-budget').textContent.includes('180')")
+        page.screenshot(path=str(wiki / "focus-desktop.png"))
+
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.locator("#btn-focus-edit").click()
+        page.locator("#learning-focus").scroll_into_view_if_needed()
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        assert page.locator("#btn-focus-save").is_visible()
+        page.screenshot(path=str(wiki / "focus-mobile.png"))
+        page.locator("#btn-focus-cancel").click()
+        page.locator("#btn-focus-archive").click()
+        page.wait_for_function("document.querySelector('#focus-status').textContent.includes('学习心得')")
+        assert page.request.get(f"{base_url}/api/study/focus").json()["focus"] is None
+        assert not errors
         browser.close()

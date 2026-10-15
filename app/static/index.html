@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>费曼学习工作台</title>
-<link rel="stylesheet" href="/static/style.css?v=20260824-idea-discussion-voice">
+<link rel="stylesheet" href="/static/style.css?v=20261015-flexible-focus">
 </head>
 <body>
 
@@ -17,18 +17,15 @@
     </div>
   </div>
 
-  <nav class="steps" aria-label="费曼学习进度">
-    <div class="step" data-step="1"><span class="step-num">1</span><span class="step-name">选择知识点</span></div>
-    <div class="step-arrow" aria-hidden="true">—</div>
-    <div class="step" data-step="2"><span class="step-num">2</span><span class="step-name">回忆表达</span></div>
-    <div class="step-arrow" aria-hidden="true">—</div>
-    <div class="step" data-step="3"><span class="step-num">3</span><span class="step-name">识别盲区</span></div>
-    <div class="step-arrow" aria-hidden="true">—</div>
-    <div class="step" data-step="4"><span class="step-num">4</span><span class="step-name">简化复述</span></div>
+  <nav class="steps study-tools" aria-label="学习工具，可自由切换">
+    <button class="btn btn-quiet" type="button" data-study-tool="read" disabled>读资料</button>
+    <button class="btn btn-quiet" type="button" data-study-tool="recall" disabled>回忆</button>
+    <button class="btn btn-quiet" type="button" data-study-tool="practice" disabled>应用</button>
+    <button class="btn btn-quiet" type="button" data-study-tool="notes" disabled>整理</button>
   </nav>
 
   <div class="top-actions">
-    <span class="study-time">今日学习 <b id="study-time-value">尚无记录</b></span>
+    <span class="study-time">今日回忆用时 <b id="study-time-value">尚无记录</b></span>
     <div class="desktop-actions">
       <button id="btn-theme-toggle" class="btn btn-quiet" type="button" aria-pressed="false">夜间阅读</button>
       <button id="btn-history" class="btn btn-quiet" type="button">学习记录</button>
@@ -80,6 +77,26 @@
   </aside>
 
   <section class="panel page-panel" id="page-panel">
+    <section id="learning-focus" class="learning-focus" aria-labelledby="focus-title">
+      <div class="focus-heading"><h2 id="focus-title">本次学习</h2><span id="focus-budget">时间按问题进展调整</span></div>
+      <p id="focus-question" class="focus-question">正在读取学习重点…</p>
+      <p id="focus-checkpoint" class="focus-checkpoint"></p>
+      <div class="focus-actions">
+        <button id="btn-focus-edit" class="btn btn-quiet" type="button" disabled>记录问题与断点</button>
+        <button id="btn-focus-return" class="text-btn hidden" type="button">回到重点资料</button>
+        <button id="btn-focus-current" class="text-btn hidden" type="button">改学当前页</button>
+        <button id="btn-focus-archive" class="text-btn hidden" type="button">归档这个问题</button>
+      </div>
+      <form id="focus-form" class="focus-form hidden">
+        <p id="focus-editor-topic" class="focus-help"></p>
+        <label class="field-label" for="focus-question-input">这次要弄清的问题<textarea id="focus-question-input" rows="2" maxlength="300" required placeholder="例如：什么情况下应该提高召回率，即使精确率下降？"></textarea></label>
+        <label class="field-label" for="focus-checkpoint-input">理解变化、未解决点与下次起点<textarea id="focus-checkpoint-input" rows="3" maxlength="3000" placeholder="原来哪里混淆；现在如何理解；下次从哪一处继续。"></textarea></label>
+        <label class="field-label focus-time-label" for="focus-minutes">参考时长（分钟）<input id="focus-minutes" type="number" min="5" max="480" value="60" required></label>
+        <p class="focus-help">时间用于判断是否收尾。阅读、回忆、应用和整理可按需要切换；同一个问题可以跨天继续。</p>
+        <div class="focus-actions"><button id="btn-focus-save" class="btn btn-primary" type="submit">保存重点与断点</button><button id="btn-focus-cancel" class="btn btn-quiet" type="button">收起编辑</button></div>
+      </form>
+      <p id="focus-status" class="focus-status" role="status"></p>
+    </section>
     <div class="empty-state" id="page-empty">
       <img class="empty-mark" src="/static/assets/quill.png" alt="">
       <p class="eyebrow">今天的下一步</p>
@@ -237,7 +254,8 @@
 
     <div id="default-right-rail" class="default-right-rail">
     <section class="panel path-card">
-      <div class="panel-head"><h2>学习路径 · 费曼四步法</h2></div>
+      <div class="panel-head"><h2>回忆表达参考</h2></div>
+      <p class="focus-help">需要检查表达时使用，可随时回到资料或应用。</p>
       <ol class="guide-list">
         <li data-guide-step="1"><span>1</span><div><b>选择知识点</b><small>明确现在要学什么</small></div></li>
         <li data-guide-step="2"><span>2</span><div><b>回忆表达</b><small>用自己的话说清核心</small></div></li>
@@ -565,7 +583,7 @@
       <div><h3 id="learning-context-title">推荐上下文</h3><p>只用于排序今天的下一步，不会改变你的 Wiki 内容或掌握等级。</p></div>
       <div class="learning-context-grid">
         <label class="field-label">考试日期（可选）<input id="exam-date" type="date"></label>
-        <label class="field-label">今日可用时间（分钟）<input id="available-minutes" type="number" min="5" max="480" value="25"></label>
+        <label class="field-label">默认参考时长（分钟，可随时调整）<input id="available-minutes" type="number" min="5" max="480" value="60"></label>
       </div>
       <div class="section-weight-head"><span>章节权重</span><small>1 = 次要，5 = 重点</small></div>
       <div id="section-weight-list" class="section-weight-list" aria-live="polite"></div>
@@ -574,6 +592,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20260824-idea-discussion-voice"></script>
+<script src="/static/app.js?v=20261015-flexible-focus"></script>
 </body>
 </html>
