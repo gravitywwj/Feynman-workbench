@@ -1,11 +1,14 @@
-"""费曼学习工作台 — Wiki 受控写回层。
-
-阅读状态只允许更新白名单 frontmatter 字段；学习内容只能在用户确认后追加到
-一个应用管理的 ``学习增量`` 区块，或新建关联想法页。写入保持 UTF-8 + LF。
-"""
+"""费曼学习工作台的受控 Wiki 写回层。"""
+import difflib
+import hashlib
+import os
 import re
-from datetime import datetime
+import subprocess
+import sys
+import tempfile
+from datetime import date
 from pathlib import Path
+from threading import Lock
 
 from app.config import get_wiki_path
 
@@ -15,14 +18,22 @@ IMPORTANCE_VALUES = {"high", "medium", "low", ""}
 
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.S)
 LEARNING_SECTION = "## 学习增量"
+PENDING_SECTION = "## 待验证问题"
+_WRITE_LOCK = Lock()
 
 
 def _validate(path: str) -> Path:
     """路径必须位于 pages/ 下的 .md，防穿越。"""
+    wiki = get_wiki_path().resolve()
+    if wiki.name == "personal-wiki" or ((wiki.parent / "SCHEMA.md").is_file() and wiki.name != "learning-wiki"):
+        raise ValueError("工作台只能写入 learning-wiki，不能写入其他知识空间。")
     p = Path(path)
     if p.suffix != ".md" or p.is_absolute() or ".." in p.parts:
         raise ValueError(f"非法页面路径: {path}")
-    f = get_wiki_path() / "pages" / p
+    pages_root = (wiki / "pages").resolve()
+    f = (pages_root / p).resolve()
+    if not f.is_relative_to(pages_root):
+        raise ValueError(f"非法页面路径: {path}")
     if not f.is_file():
         raise FileNotFoundError(path)
     return f
@@ -86,96 +97,145 @@ def _normalized(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def append_learning_update(path: str, content: str, update_id: int) -> dict:
-    """Append an approved draft under one app-owned Wiki section.
+def _atomic_write(path: Path, content: str) -> None:
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="\n", dir=path.parent, delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(content)
+        os.replace(temporary, path)
+    finally:
+        if temporary:
+            temporary.unlink(missing_ok=True)
 
-    The caller stores the returned before/after snapshot before exposing undo.
-    Existing authored content is never rewritten or interpreted by the app.
-    """
-    entry = content.strip()
-    if not entry:
-        raise ValueError("知识库草案不能为空")
-    file_path = _validate(path)
-    before = _normalized(file_path.read_text(encoding="utf-8"))
-    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-    marker = f"<!-- feynman-workbench:update:{update_id} -->"
-    block = f"\n### 学习记录 · {stamp}\n\n{entry}\n\n{marker}\n"
-    if LEARNING_SECTION in before:
-        after = before.rstrip() + "\n" + block
+
+def _wiki_files() -> tuple[Path, Path, Path]:
+    wiki = get_wiki_path().resolve()
+    if wiki.name == "personal-wiki":
+        raise ValueError("工作台只能写入 learning-wiki，不能写入其他知识空间。")
+    if (wiki.parent / "SCHEMA.md").is_file():
+        if wiki.name != "learning-wiki":
+            raise ValueError("工作台只能写入 learning-wiki，不能写入其他知识空间。")
+        schema_root = wiki.parent
     else:
-        after = before.rstrip() + f"\n\n{LEARNING_SECTION}\n" + block
-    file_path.write_text(after, encoding="utf-8", newline="\n")
-    return {"path": path, "before_content": before, "after_content": after, "created_page": False}
+        schema_root = wiki
+    index = wiki / "index.md"
+    log = schema_root / "log.md"
+    if not (schema_root / "SCHEMA.md").is_file() or not index.is_file() or not log.is_file():
+        raise ValueError("Wiki 写回需要 SCHEMA.md、学习索引 index.md 和操作日志 log.md。")
+    return wiki, index, log
 
 
-def create_linked_idea_page(source_path: str, title: str, content: str, update_id: int) -> dict:
-    """Create one new, linked idea page after the learner approves the draft."""
-    _validate(source_path)
-    clean_title = re.sub(r"[\\/:*?\"<>|]+", "-", title).strip()[:80] or "学习想法"
-    clean_title = re.sub(r"[\r\n]+", " ", clean_title).strip() or "学习想法"
-    slug = re.sub(r"[^\w\u4e00-\u9fff-]+", "-", clean_title).strip("-") or "learning-idea"
-    ideas_dir = get_wiki_path() / "pages" / "学习想法"
-    ideas_dir.mkdir(parents=True, exist_ok=True)
-    suffix = datetime.now().strftime("%Y%m%d-%H%M%S")
-    target = ideas_dir / f"{slug}-{suffix}.md"
-    counter = 2
-    while target.exists():
-        target = ideas_dir / f"{slug}-{suffix}-{counter}.md"
-        counter += 1
-    source_label = Path(source_path).stem
-    after = _normalized(
-        f"---\n"
-        f"title: {clean_title}\n"
-        f"type: learning-idea\n"
-        f"created: {datetime.now().date().isoformat()}\n"
-        f"---\n\n"
-        f"# {clean_title}\n\n"
-        f"关联学习页：[[{source_label}]]\n\n"
-        f"{LEARNING_SECTION}\n\n"
-        f"{content.strip()}\n\n"
-        f"<!-- feynman-workbench:update:{update_id} -->\n"
-    )
-    target.write_text(after, encoding="utf-8", newline="\n")
-    relative_path = target.relative_to(get_wiki_path() / "pages").as_posix()
-    return {"path": relative_path, "before_content": "", "after_content": after, "created_page": True}
+def _insert_section(text: str, heading: str, block: str) -> str:
+    marker = re.search(rf"(?m)^{re.escape(heading)}[ \t]*$", text)
+    if not marker:
+        return text.rstrip() + f"\n\n{heading}\n\n{block}\n"
+    next_heading = re.search(r"(?m)^## ", text[marker.end():])
+    end = marker.end() + next_heading.start() if next_heading else len(text)
+    return text[:end].rstrip() + f"\n\n{block}\n\n" + text[end:].lstrip("\n")
 
 
-def create_standalone_idea_page(title: str, content: str, idea_id: int) -> dict:
-    """Create a Wiki page for an idea that is not attached to a study session."""
-    clean_title = re.sub(r"[\\/:*?\"<>|]+", "-", title).strip()[:80] or "学习想法"
-    clean_title = re.sub(r"[\r\n]+", " ", clean_title).strip() or "学习想法"
-    slug = re.sub(r"[^\w\u4e00-\u9fff-]+", "-", clean_title).strip("-") or "learning-idea"
-    ideas_dir = get_wiki_path() / "pages" / "学习想法"
-    ideas_dir.mkdir(parents=True, exist_ok=True)
-    suffix = datetime.now().strftime("%Y%m%d-%H%M%S")
-    target = ideas_dir / f"{slug}-{suffix}.md"
-    counter = 2
-    while target.exists():
-        target = ideas_dir / f"{slug}-{suffix}-{counter}.md"
-        counter += 1
-    after = _normalized(
-        f"---\n"
-        f"title: {clean_title}\n"
-        f"type: learning-idea\n"
-        f"created: {datetime.now().date().isoformat()}\n"
-        f"---\n\n"
-        f"# {clean_title}\n\n"
-        f"{LEARNING_SECTION}\n\n"
-        f"{content.strip()}\n\n"
-        f"<!-- feynman-workbench:idea:{idea_id} -->\n"
-    )
-    target.write_text(after, encoding="utf-8", newline="\n")
-    relative_path = target.relative_to(get_wiki_path() / "pages").as_posix()
-    return {"path": relative_path, "before_content": "", "after_content": after, "created_page": True}
+def preview_reviewed_update(path: str, content: str, update_id: int, *, kind: str, citations: list[str]) -> dict:
+    """Produce the exact one-page diff and stale-write fingerprint before approval."""
+    if kind not in {"verified", "tentative"} or not content.strip():
+        raise ValueError("写回类别或草稿无效")
+    wiki, index_file, _ = _wiki_files()
+    page = _validate(path)
+    before = _normalized(page.read_text(encoding="utf-8"))
+    index_before = _normalized(index_file.read_text(encoding="utf-8"))
+    if not FRONTMATTER_RE.match(before) or not re.search(r"(?m)^updated:[ \t]*\d{4}-\d{2}-\d{2}[ \t]*$", before):
+        raise ValueError("目标页面缺少可维护的 frontmatter 或 updated 日期")
+    if f"[[{Path(path).stem}]]" not in index_before:
+        raise ValueError("目标页面未登记在学习索引中")
+    today = date.today().isoformat()
+    after = re.sub(r"(?m)^updated:[ \t]*\d{4}-\d{2}-\d{2}[ \t]*$", f"updated: {today}", before, count=1)
+    heading = LEARNING_SECTION if kind == "verified" else PENDING_SECTION
+    source_line = "\n\n" + " ".join(f"^[{source}]" for source in citations) if kind == "verified" else "\n\n> 待验证；不能作为已核实事实引用。"
+    block = f"{content.strip()}{source_line}\n\n<!-- feynman-workbench:{update_id}:{kind} -->"
+    after = _insert_section(after, heading, block)
+    match = re.search(r"(?m)^(> Last updated: )\d{4}-\d{2}-\d{2}( \| Total pages: \d+)[ \t]*$", index_before)
+    if not match:
+        raise ValueError("学习索引缺少规范的更新日期与页面总数")
+    index_after = index_before[:match.start()] + match.group(1) + today + match.group(2) + index_before[match.end():]
+    base_hash = hashlib.sha256((before + "\0" + index_before).encode("utf-8")).hexdigest()
+    diff = "".join(difflib.unified_diff(before.splitlines(keepends=True), after.splitlines(keepends=True),
+                                        fromfile=path, tofile=path))
+    return {"path": path, "wiki_root": str(wiki), "before_content": before, "after_content": after,
+            "index_before": index_before, "index_after": index_after, "base_hash": base_hash, "diff": diff,
+            "kind": kind, "citations": citations}
 
 
-def restore_revision(path: str, before_content: str, after_content: str, *, created_page: bool) -> None:
-    """Undo only when the Wiki page still matches the recorded post-write state."""
-    file_path = _validate(path)
-    current = _normalized(file_path.read_text(encoding="utf-8"))
-    if current != _normalized(after_content):
-        raise ValueError("该 Wiki 页面在写入后又被修改，无法安全自动撤销。请先查看变更后再手动处理。")
-    if created_page:
-        file_path.unlink()
+def _run_lint(wiki: Path) -> None:
+    script = wiki / "scripts" / "lint_wiki.py"
+    if not script.is_file():
         return
-    file_path.write_text(_normalized(before_content), encoding="utf-8", newline="\n")
+    result = subprocess.run([sys.executable, str(script)], cwd=wiki, capture_output=True, text=True, timeout=45)
+    if result.returncode:
+        errors = [line for line in result.stdout.splitlines() if line.startswith("ERROR")]
+        raise ValueError("Wiki 校验失败：" + ("；".join(errors[:3]) or result.stderr.strip()[:400]))
+
+
+def apply_reviewed_update(path: str, content: str, update_id: int, *, kind: str,
+                          citations: list[str], expected_hash: str) -> dict:
+    """Write one reviewed page, index date and append-only log as one recoverable operation."""
+    with _WRITE_LOCK:
+        preview = preview_reviewed_update(path, content, update_id, kind=kind, citations=citations)
+        if preview["base_hash"] != expected_hash:
+            raise ValueError("Wiki 页面或索引已变化，请重新审核草稿。")
+        wiki, index_file, log_file = _wiki_files()
+        page = _validate(path)
+        if (_normalized(page.read_text(encoding="utf-8")) != preview["before_content"]
+                or _normalized(index_file.read_text(encoding="utf-8")) != preview["index_before"]):
+            raise ValueError("Wiki 页面或索引已变化，请重新审核草稿。")
+        today = date.today().isoformat()
+        evidence = ", ".join(citations) if citations else "待验证"
+        log_entry = f"\n## [{today}] update | feynman-workbench: {path}\n- Update: {update_id}\n- Kind: {kind}\n- Evidence: {evidence}\n"
+        try:
+            _atomic_write(page, preview["after_content"])
+            _atomic_write(index_file, preview["index_after"])
+            _run_lint(wiki)
+            with log_file.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(log_entry)
+        except Exception:
+            if page.read_text(encoding="utf-8") == preview["after_content"]:
+                _atomic_write(page, preview["before_content"])
+            if index_file.read_text(encoding="utf-8") == preview["index_after"]:
+                _atomic_write(index_file, preview["index_before"])
+            raise
+        return {"path": path, "before_content": preview["before_content"],
+                "after_content": preview["after_content"], "created_page": False,
+                "manifest": {"wiki_root": str(wiki), "index_before": preview["index_before"],
+                             "index_after": preview["index_after"], "kind": kind}}
+
+
+def restore_revision(path: str, before_content: str, after_content: str, *, created_page: bool,
+                     manifest: dict | None = None) -> None:
+    """Undo only when the Wiki page still matches the recorded post-write state."""
+    with _WRITE_LOCK:
+        file_path = _validate(path)
+        current = _normalized(file_path.read_text(encoding="utf-8"))
+        if current != _normalized(after_content):
+            raise ValueError("该 Wiki 页面在写入后又被修改，无法安全自动撤销。请先查看变更后再手动处理。")
+        if manifest:
+            wiki, index_file, log_file = _wiki_files()
+            if str(wiki) != manifest.get("wiki_root") or _normalized(index_file.read_text(encoding="utf-8")) != manifest.get("index_after"):
+                raise ValueError("Wiki 路径或索引已变化，不能安全自动撤销。")
+            today = date.today().isoformat()
+            log_entry = f"\n## [{today}] undo | feynman-workbench: {path}\n"
+            try:
+                _atomic_write(index_file, manifest["index_before"])
+                _atomic_write(file_path, _normalized(before_content))
+                _run_lint(wiki)
+                with log_file.open("a", encoding="utf-8", newline="\n") as handle:
+                    handle.write(log_entry)
+            except Exception:
+                if file_path.read_text(encoding="utf-8") == _normalized(before_content):
+                    _atomic_write(file_path, _normalized(after_content))
+                if index_file.read_text(encoding="utf-8") == manifest["index_before"]:
+                    _atomic_write(index_file, manifest["index_after"])
+                raise
+            return
+        if created_page:
+            file_path.unlink()
+            return
+        _atomic_write(file_path, _normalized(before_content))

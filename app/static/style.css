@@ -405,3 +405,8 @@ body.home-mode .layout { align-items: stretch; } body.home-mode .right-rail { di
   .practice-panel-head, .practice-attempt-head, .practice-result-head { gap: 8px; }
 }
 .modal-card { max-height: calc(100vh - 40px); overflow-y: auto; }
+
+.idea-draft-card select { width: 100%; min-height: 36px; padding: 7px 9px; border: 1px solid var(--line-strong); border-radius: 7px; color: var(--ink); background: var(--card); font: inherit; font-size: 13px; }
+.wiki-final-review { display: grid; gap: 8px; min-width: 0; padding: 12px; border: 1px solid #c8d6b9; border-radius: 8px; color: var(--ink-soft); background: var(--sage-pale); font: 12px/1.65 "Microsoft YaHei", sans-serif; }
+.wiki-final-review h4 { color: var(--sage-dark); font-size: 13px; }.wiki-final-review p { margin: 0; }.wiki-final-review summary { cursor: pointer; color: var(--sage-dark); }.wiki-final-review li { overflow-wrap: anywhere; }.wiki-final-review li p { margin-top: 4px; }
+.wiki-review-diff { max-height: 260px; overflow: auto; padding: 10px; border-radius: 6px; color: var(--ink); background: var(--card); font: 11px/1.5 Consolas, monospace; white-space: pre; }

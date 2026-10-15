@@ -5,8 +5,8 @@
 """
 from __future__ import annotations
 
-from pathlib import Path
 import json
+from pathlib import Path
 
 from app import db
 from app.services import tutor, wiki_reader, wiki_writer
@@ -183,6 +183,8 @@ def generate_draft(idea_id: int) -> dict:
         title=idea["title"], initial_content=idea["initial_content"], turns=turn_items,
         evidence=evidence, persona=idea["persona"],
     )
+    assessment = _decode_json(idea["assessment_json"], {})
+    assessment.update(draft)
     with db.cursor() as cur:
         cur.execute(
             "INSERT INTO idea_turns (idea_id, role, kind, content, metadata_json) VALUES (?, 'agent', 'summary', ?, ?)",
@@ -191,14 +193,39 @@ def generate_draft(idea_id: int) -> dict:
         cur.execute(
             "UPDATE idea_sessions SET draft_title = ?, draft_content = ?, status = 'draft', "
             "assessment_json = ?, updated_at = datetime('now', 'localtime') WHERE id = ?",
-            (draft["draft_title"], draft["draft_content"], json.dumps(draft, ensure_ascii=False), idea_id),
+            (draft["draft_title"], draft["draft_content"], json.dumps(assessment, ensure_ascii=False), idea_id),
         )
     return get_idea(idea_id)
 
 
+def review_idea(idea_id: int, *, content: str, page_path: str) -> dict:
+    idea = _row(idea_id)
+    clean = content.strip()
+    evidence = _decode_json(idea["evidence_json"], [])
+    candidates = {item.get("path") for item in evidence}
+    if idea["status"] != "draft" or not clean or page_path not in candidates:
+        raise ValueError("请选择已有的关联学习页，并审核非空草稿。")
+    raw = wiki_reader.raw_evidence_for_page(page_path, clean)
+    verdict = tutor.review_wiki_proposal(content=clean, raw_evidence=raw)
+    kind = "verified" if verdict["verdict"] == "supported" else "tentative"
+    preview = None
+    if verdict["verdict"] != "problematic":
+        preview = wiki_writer.preview_reviewed_update(
+            page_path, clean, idea_id, kind=kind, citations=verdict["citations"],
+        )
+    assessment = _decode_json(idea["assessment_json"], {})
+    assessment["review"] = {**verdict, "content": clean, "target_path": page_path,
+                            "kind": kind if preview else None, "base_hash": preview["base_hash"] if preview else None,
+                            "diff": preview["diff"] if preview else "", "raw_evidence": raw}
+    with db.cursor() as cur:
+        cur.execute("UPDATE idea_sessions SET draft_content = ?, assessment_json = ?, updated_at = datetime('now', 'localtime') WHERE id = ?",
+                    (clean, json.dumps(assessment, ensure_ascii=False), idea_id))
+    return get_idea(idea_id)
+
+
 def apply_idea(idea_id: int, *, mode: str, title: str, content: str) -> dict:
-    if mode not in {"create_idea", "keep_local"}:
-        raise ValueError("独立想法只支持新建 Wiki 页或保留在本地")
+    if mode not in {"append_current", "append_pending", "keep_local"}:
+        raise ValueError("独立想法只支持写入关联学习页或保留在本地")
     idea = _row(idea_id)
     if idea["status"] != "draft":
         raise ValueError("请先生成可审核的 Wiki 草稿。")
@@ -214,12 +241,23 @@ def apply_idea(idea_id: int, *, mode: str, title: str, content: str) -> dict:
                 (clean_title, clean_content[:5000], idea_id),
             )
         return get_idea(idea_id)
-    change = wiki_writer.create_standalone_idea_page(clean_title, clean_content, idea_id)
+    review = _decode_json(idea["assessment_json"], {}).get("review") or {}
+    expected_mode = "append_current" if review.get("kind") == "verified" else "append_pending"
+    if (review.get("verdict") == "problematic" or review.get("content") != clean_content
+            or mode != expected_mode or not review.get("target_path") or not review.get("base_hash")):
+        raise ValueError("草稿尚未通过最终审核，或审核后被修改；请重新审核。")
+    if wiki_reader.raw_evidence_for_page(review["target_path"], clean_content) != review.get("raw_evidence"):
+        raise ValueError("原始资料已变化，请重新审核草稿。")
+    change = wiki_writer.apply_reviewed_update(
+        review["target_path"], clean_content, idea_id, kind=review["kind"],
+        citations=review.get("citations", []), expected_hash=review["base_hash"],
+    )
     try:
         with db.cursor() as cur:
             cur.execute(
-                "INSERT INTO idea_revisions (idea_id, page_path, before_content, after_content, created_page) VALUES (?, ?, ?, ?, 1)",
-                (idea_id, change["path"], change["before_content"], change["after_content"]),
+                "INSERT INTO idea_revisions (idea_id, page_path, before_content, after_content, created_page, change_json) VALUES (?, ?, ?, ?, 0, ?)",
+                (idea_id, change["path"], change["before_content"], change["after_content"],
+                 json.dumps(change["manifest"], ensure_ascii=False)),
             )
             cur.execute(
                 "UPDATE idea_sessions SET draft_title = ?, draft_content = ?, status = 'applied', wiki_path = ?, "
@@ -229,7 +267,8 @@ def apply_idea(idea_id: int, *, mode: str, title: str, content: str) -> dict:
     except Exception:
         try:
             wiki_writer.restore_revision(
-                change["path"], change["before_content"], change["after_content"], created_page=True,
+                change["path"], change["before_content"], change["after_content"],
+                created_page=False, manifest=change["manifest"],
             )
         except (FileNotFoundError, ValueError, OSError):
             pass
@@ -249,7 +288,8 @@ def undo_idea(idea_id: int) -> dict:
     if not revision:
         raise LookupError("没有可撤销的 Wiki 快照")
     wiki_writer.restore_revision(
-        revision["page_path"], revision["before_content"], revision["after_content"], created_page=True,
+        revision["page_path"], revision["before_content"], revision["after_content"],
+        created_page=bool(revision["created_page"]), manifest=_decode_json(revision["change_json"], {}),
     )
     with db.cursor() as cur:
         cur.execute("UPDATE idea_revisions SET undone_at = datetime('now', 'localtime') WHERE id = ?", (revision["id"],))

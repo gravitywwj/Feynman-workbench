@@ -102,6 +102,19 @@ def wiki(tmp_path, monkeypatch):
         "---\ntitle: 投资基础\ncreated: 2026-08-01\nupdated: 2026-08-02\ntype: concept\nstatus: unread\ntags: [finance]\n---\n\n# 投资基础\n\n长期投资基础。\n", encoding="utf-8"
     )
     (pages / "dashboard.md").write_text(DASHBOARD, encoding="utf-8")
+    (tmp_path / "SCHEMA.md").write_text("# Test Wiki Schema\n", encoding="utf-8")
+    (tmp_path / "index.md").write_text(
+        "> Last updated: 2026-08-05 | Total pages: 8\n\n- [[query-rewriting]] — 查询改写。\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "log.md").write_text("# Wiki Log\n", encoding="utf-8")
+    raw = tmp_path / "raw" / "rag"
+    raw.mkdir(parents=True)
+    (raw / "xxx.md").write_text(
+        "---\nsource_url: test://query-rewriting\ningested: 2026-08-01\nsha256: fixture\n---\n\n"
+        "查询改写应补足对象、场景和约束，再比较改写前后的检索结果。\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("FEYNMAN_WIKI_PATH", str(tmp_path))
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
