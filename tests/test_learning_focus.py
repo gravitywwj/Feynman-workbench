@@ -73,7 +73,7 @@ def test_focus_preserves_previous_page_and_rejects_stale_edits(wiki):
 def test_focus_backup_restores_without_overwriting_another_problem(wiki):
     original = save_focus()
     exported = client.get("/api/study/export").json()
-    assert exported["version"] == 7 and exported["learning_focus"] == [original]
+    assert exported["version"] == 8 and exported["learning_focus"] == [original]
     with db.cursor() as cur:
         cur.execute("DELETE FROM learning_focus")
     assert client.post("/api/study/import/preview", json={"payload": exported}).json()["incoming"]["learning_focus"] == 1

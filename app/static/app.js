@@ -19,6 +19,7 @@ const state = {
   practiceSelectedTask: null,
   practicePagePath: null,
   practiceNotice: '',
+  microRecall: null,
 };
 
 const readingSettingsKey = 'feynman-reading-settings';
@@ -31,6 +32,10 @@ const defaultReadingSettings = {
 };
 let readingSettings = loadReadingSettings();
 let recallStartedAt = null;
+let microSavePromise = Promise.resolve();
+let practiceDraftTimer = null;
+let practiceDraftPromise = Promise.resolve();
+let practiceDraftPending = null;
 
 /* ===== 工具 ===== */
 function esc(s) {
@@ -109,7 +114,7 @@ async function loadHomeAction() {
     title.textContent = action.title;
     detail.textContent = action.detail;
     button.disabled = action.type === 'empty';
-    button.textContent = { configure: '连接资料或体验示例', focus: '继续这个问题', review: '先完成这一张', review_complete: '查看复习安排', continue: '继续这次学习', start: '开始这个概念', empty: '等待 Wiki 内容' }[action.type] || '开始学习';
+    button.textContent = { configure: '连接资料或体验示例', focus: '继续这个问题', review: '先完成这一张', review_complete: '查看复习安排', continue: '继续这次学习', follow_up: '继续当前追问', micro_recall: '继续这个问题', practice_resume: '继续未完成自测', start: '开始这个概念', empty: '等待 Wiki 内容' }[action.type] || '开始学习';
     alternative.classList.toggle('hidden', !(action.type === 'start' && action.alternatives?.length));
     playEntryMotion(document.getElementById('page-empty'));
     alternative.onclick = () => {
@@ -127,6 +132,9 @@ async function loadHomeAction() {
       if (action.type === 'review' || action.type === 'review_complete') return openReviewPlan('scheduled');
       if (action.page_path) await selectConcept(action.page_path);
       if (action.type === 'continue') openRecall('simplify', action.session_id);
+      if (action.type === 'follow_up') await openRecall('follow-up', action.session_id);
+      if (action.type === 'micro_recall') await openMicroRecall(action.recall_uid);
+      if (action.type === 'practice_resume') await openPracticePanel(action.attempt_uid);
     };
     if (!state.selected) loadHomeDashboard();
   } catch {
@@ -512,6 +520,7 @@ async function selectConcept(path) {
     document.getElementById('page-body').innerHTML = html;
     document.getElementById('page-body').classList.remove('expanded');
     document.getElementById('btn-toggle-reference').textContent = '查看完整资料';
+    await loadMicroRecallForPage(path);
     syncNoteButton();
     syncLocalStudyIndicators();
     renderPageMeta();
@@ -528,6 +537,272 @@ async function selectConcept(path) {
   } catch (e) {
     document.getElementById('page-body').innerHTML = `<p style="color:var(--err)">${esc(e.message)}</p>`;
   }
+}
+
+let selectedSourceBlock = null;
+let microSaveTimer = null;
+let microSaveVersion = 0;
+let microPanelDismissed = false;
+
+function sourceBlockFromNode(node) {
+  const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+  const block = element?.closest('[data-source-block]');
+  if (!block || !document.getElementById('page-body').contains(block)) return null;
+  if (!block.matches('p, li, pre, table')) return null;
+  return block;
+}
+
+function updateSelectionAction() {
+  const selection = window.getSelection();
+  const button = document.getElementById('btn-record-selection');
+  if (!button) return;
+  const range = selection && !selection.isCollapsed ? selection.getRangeAt(0) : null;
+  const startBlock = range && sourceBlockFromNode(range.startContainer);
+  const endBlock = range && sourceBlockFromNode(range.endContainer);
+  selectedSourceBlock = startBlock && startBlock === endBlock ? startBlock : null;
+  button.disabled = !selectedSourceBlock || Boolean(state.microRecall && ['draft', 'active'].includes(state.microRecall.status));
+}
+
+function scrollToSourceBlock(index) {
+  const block = index === null || index === undefined || String(index).trim() === '' ? NaN : Number(index);
+  const target = Number.isInteger(block) && block >= 0 ? document.getElementById(`wiki-source-${block}`) : null;
+  const body = document.getElementById('page-body');
+  if (!target) {
+    body.scrollIntoView({ block: 'start', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+    return;
+  }
+  body.classList.add('expanded');
+  document.getElementById('btn-toggle-reference').textContent = '收起完整资料';
+  target.scrollIntoView({ block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  target.focus?.({ preventScroll: true });
+}
+
+function microRecallLocalKey(path) {
+  return `feynman-micro-recall:${state.workspace?.wiki_path || ''}:${path}`;
+}
+
+function saveMicroRecallLocal() {
+  const item = state.microRecall;
+  if (!item || !state.selected) return;
+  storageSet(microRecallLocalKey(state.selected.path), JSON.stringify({
+    recall_uid: item.recall_uid, page_path: item.page_path, source_index: item.source_index,
+    source_excerpt: item.source_excerpt, source_heading: item.source_heading || '',
+    question: document.getElementById('micro-recall-question').value,
+    answer: document.getElementById('micro-recall-answer').value,
+    pending_turn_id: item.pending_turn_id || '', pending_answer: item.pending_answer || '',
+  }));
+}
+
+function renderMicroRecall() {
+  const panel = document.getElementById('micro-recall-panel');
+  const item = state.microRecall;
+  panel.classList.toggle('hidden', !item || microPanelDismissed);
+  document.getElementById('btn-resume-micro-recall').classList.toggle('hidden', !item || !microPanelDismissed);
+  if (!item) return;
+  const question = document.getElementById('micro-recall-question');
+  const answer = document.getElementById('micro-recall-answer');
+  question.value = item.question || '';
+  question.readOnly = item.status !== 'draft';
+  answer.value = item.pending_answer || (item.status === 'draft' ? item.answer || '' : '');
+  answer.disabled = Boolean(item.pending_turn_id) || item.status === 'complete';
+  document.getElementById('micro-recall-excerpt').textContent = item.source_excerpt || '';
+  document.getElementById('micro-recall-source-state').textContent = item.current_source_label || '待核对';
+  document.getElementById('micro-recall-source-message').textContent = item.current_source_message || '保存前会由服务端重新读取原文。';
+  const sourceDetails = document.getElementById('micro-recall-source');
+  sourceDetails.classList.toggle('hidden', !item.answer && item.status === 'draft');
+  sourceDetails.open = item.status !== 'draft' && Boolean(item.answer);
+  const followup = item.session?.followup;
+  const followupPanel = document.getElementById('micro-recall-followup');
+  followupPanel.classList.toggle('hidden', !followup);
+  if (followup) {
+    document.getElementById('micro-recall-feedback').textContent = followup.feedback || (item.status === 'active' ? '回答已保存，反馈正在等待重试。' : '');
+    document.getElementById('micro-recall-task').textContent = followup.task || (followup.stage === 'complete' ? '这一条追问已结束。资料核对状态仍显示在上方。' : '');
+  }
+  const submit = document.getElementById('btn-submit-micro-recall');
+  submit.disabled = item.status === 'complete' || (item.status === 'draft' && !question.value.trim()) || Boolean(item.pending_turn_id);
+  submit.textContent = item.pending_turn_id ? '重试本轮反馈' : item.status === 'draft' ? '提交独立回答' : followup?.active ? '提交这一轮' : '追问已结束';
+  submit.disabled = submit.disabled || item.status === 'active' && !followup?.task;
+  document.getElementById('btn-save-micro-recall').disabled = item.status !== 'draft';
+  document.getElementById('btn-record-selection').disabled = ['draft', 'active'].includes(item.status);
+  document.getElementById('micro-recall-history').classList.toggle('hidden', !(item.history || []).length);
+  document.getElementById('micro-recall-history-content').innerHTML = (item.history || []).map(entry =>
+    `<p><b>${esc(entry.question)}</b><br><span>${esc(entry.status === 'complete' ? '已完成' : entry.status === 'active' ? '待接续' : '草稿')}</span></p>`
+  ).join('');
+}
+
+async function loadMicroRecallForPage(path) {
+  state.microRecall = null;
+  microPanelDismissed = false;
+  try {
+    const data = await api('/api/study/micro-recalls?page_path=' + encodeURIComponent(path));
+    const item = (data.items || []).find(entry => ['draft', 'active'].includes(entry.status));
+    const history = (data.items || []).filter(entry => entry.status === 'complete');
+    if (item) {
+      state.microRecall = { ...item, history };
+      if (item.session_id) state.microRecall.session = await api(`/api/study/sessions/${item.session_id}`);
+      if (state.microRecall.session?.followup?.pending_turn_id) {
+        const pending = state.microRecall.session.turns.find(turn => turn.idempotency_key === state.microRecall.session.followup.pending_turn_id);
+        state.microRecall.pending_answer = pending?.content || '';
+      }
+    } else {
+      let local = null;
+      try { local = JSON.parse(storageGet(microRecallLocalKey(path)) || 'null'); } catch { local = null; }
+      state.microRecall = local ? { ...local, page_title: state.selected?.title || path, status: 'draft', current_source_label: '本地草稿', current_source_message: '草稿保存在此浏览器；保存时会重新读取 Wiki。', history } : null;
+    }
+    if (state.microRecall) state.microRecall.history = history;
+  } catch (error) {
+    let local = null;
+    try { local = JSON.parse(storageGet(microRecallLocalKey(path)) || 'null'); } catch { local = null; }
+    state.microRecall = local ? { ...local, page_title: state.selected?.title || path, status: 'draft', current_source_label: '本地草稿', current_source_message: `服务端暂不可用；${error.message}` } : null;
+  }
+  renderMicroRecall();
+}
+
+function beginMicroRecall() {
+  if (!selectedSourceBlock || !state.selected) return;
+  if (state.microRecall && ['draft', 'active'].includes(state.microRecall.status)) return;
+  const index = Number(selectedSourceBlock.dataset.sourceBlock);
+  const uid = crypto.randomUUID();
+  state.microRecall = {
+    recall_uid: uid, page_path: state.selected.path, page_title: state.selected.title,
+    source_index: index, source_excerpt: selectedSourceBlock.innerText.replace(/\s+/g, ' ').trim(),
+    source_heading: '', question: '', answer: '', status: 'draft',
+    current_source_label: '可定位', current_source_message: '保存时会由服务端重新读取并校验这段 Wiki 原文。', history: [],
+  };
+  microPanelDismissed = false;
+  document.getElementById('micro-recall-question').value = '';
+  document.getElementById('micro-recall-answer').value = '';
+  document.getElementById('micro-recall-status').textContent = '已选中一个正文块。先写问题；输入会自动保存草稿。';
+  renderMicroRecall();
+  document.getElementById('micro-recall-panel').scrollIntoView({ block: 'nearest', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  document.getElementById('micro-recall-question').focus();
+  saveMicroRecallLocal();
+}
+
+async function persistMicroRecallDraft() {
+  const item = state.microRecall;
+  if (!item || item.status !== 'draft') return;
+  const question = document.getElementById('micro-recall-question').value.trim();
+  const answer = document.getElementById('micro-recall-answer').value;
+  saveMicroRecallLocal();
+  if (!question) return;
+  if (item.saving) return microSavePromise;
+  const version = microSaveVersion;
+  item.saving = true;
+  microSavePromise = (async () => {
+    try {
+      const saved = item.saved
+        ? await api(`/api/study/micro-recalls/${encodeURIComponent(item.recall_uid)}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question, answer }),
+        })
+        : await api('/api/study/micro-recalls', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ recall_uid: item.recall_uid, page_path: item.page_path, source_index: item.source_index, excerpt: item.source_excerpt, question, answer }),
+        });
+      state.microRecall = { ...saved.recall, saved: true, history: item.history || [] };
+      document.getElementById('micro-recall-status').textContent = '问题草稿已保存。刷新后可从这里接续。';
+    } catch (error) {
+      document.getElementById('micro-recall-status').textContent = `服务端暂不可用，草稿仍保存在此浏览器：${error.message}`;
+    } finally {
+      if (state.microRecall) state.microRecall.saving = false;
+      if (version !== microSaveVersion) persistMicroRecallDraft();
+      renderMicroRecall();
+    }
+  })();
+  return microSavePromise;
+}
+
+function queueMicroRecallSave() {
+  if (!state.microRecall) return;
+  microSaveVersion += 1;
+  saveMicroRecallLocal();
+  clearTimeout(microSaveTimer);
+  microSaveTimer = setTimeout(() => state.microRecall.status === 'draft'
+    ? persistMicroRecallDraft() : persistActiveMicroRecallAnswer(), 350);
+  document.getElementById('btn-submit-micro-recall').disabled = !document.getElementById('micro-recall-question').value.trim();
+}
+
+async function persistActiveMicroRecallAnswer() {
+  const item = state.microRecall;
+  if (!item || item.status !== 'active' || item.pending_turn_id) return;
+  const answer = document.getElementById('micro-recall-answer').value;
+  try {
+    await api(`/api/study/micro-recalls/${encodeURIComponent(item.recall_uid)}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: item.question, answer }),
+    });
+    document.getElementById('micro-recall-status').textContent = '当前回答草稿已保存。';
+  } catch (error) {
+    document.getElementById('micro-recall-status').textContent = `回答草稿保存在此浏览器：${error.message}`;
+  }
+}
+
+async function saveMicroRecallNow() {
+  if (!document.getElementById('micro-recall-question').value.trim()) {
+    document.getElementById('micro-recall-status').textContent = '先写一个围绕所选段落的具体问题。';
+    document.getElementById('micro-recall-question').focus();
+    return;
+  }
+  await persistMicroRecallDraft();
+}
+
+async function submitMicroRecall() {
+  let item = state.microRecall;
+  if (!item) return;
+  const answer = document.getElementById('micro-recall-answer').value.trim();
+  if (!answer) { document.getElementById('micro-recall-status').textContent = '先凭记忆写下回答。'; return; }
+  const button = document.getElementById('btn-submit-micro-recall');
+  button.disabled = true;
+  try {
+    if (item.status === 'draft') {
+      await persistMicroRecallDraft();
+      if (!state.microRecall?.saved) throw new Error('问题草稿尚未写入学习库。');
+      item = state.microRecall;
+    }
+    if (!item.pending_turn_id) item.pending_turn_id = crypto.randomUUID();
+    item.pending_answer = answer;
+    saveMicroRecallLocal();
+    const details = item.status === 'draft'
+      ? await api(`/api/study/micro-recalls/${encodeURIComponent(item.recall_uid)}/answer`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ answer, idempotency_key: item.pending_turn_id }),
+      })
+      : await api(`/api/study/sessions/${item.session_id}/follow-ups`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ answer, idempotency_key: item.pending_turn_id }),
+      });
+    item.status = details.followup.stage === 'complete' ? 'complete' : 'active';
+    item.session_id = details.session.id;
+    item.pending_turn_id = details.followup.pending_turn_id || '';
+    item.pending_answer = '';
+    item.answer = answer;
+    item.session = details;
+    if (item.status === 'complete') item.history = [{ question: item.question, status: 'complete' }, ...(item.history || [])];
+    saveMicroRecallLocal();
+    document.getElementById('micro-recall-status').textContent = item.status === 'complete' ? '追问已结束。复习卡与历史依据已保存。' : '回答已保存；当前阶段与下一问已写入学习记录。';
+  } catch (error) {
+    document.getElementById('micro-recall-status').textContent = `本轮未完成，回答已保留；可重试相同内容：${error.message}`;
+    item.pending_answer = answer;
+  } finally {
+    renderMicroRecall();
+    saveMicroRecallLocal();
+  }
+}
+
+async function openMicroRecall(uid) {
+  const result = await api(`/api/study/micro-recalls/${encodeURIComponent(uid)}`);
+  state.microRecall = result.recall;
+  microPanelDismissed = false;
+  if (state.microRecall.session_id) {
+    state.microRecall.session = await api(`/api/study/sessions/${state.microRecall.session_id}`);
+    const key = state.microRecall.session.followup?.pending_turn_id;
+    if (key) {
+      const pending = state.microRecall.session.turns.find(turn => turn.idempotency_key === key);
+      state.microRecall.pending_turn_id = key;
+      state.microRecall.pending_answer = pending?.content || '';
+    }
+  }
+  renderMicroRecall();
+  if (state.microRecall.current_source_status === 'locatable') scrollToSourceBlock(state.microRecall.source_index);
+  document.getElementById('micro-recall-panel').scrollIntoView({ block: 'nearest' });
 }
 
 function selectRequestedConcept() {
@@ -1067,7 +1342,7 @@ function resetRecallEvidence() {
   updateRecallEvidenceStatus();
 }
 
-function openRecall(stage = 'intro', sessionId = null) {
+async function openRecall(stage = 'intro', sessionId = null) {
   if (!state.selected) return;
   const { path, title } = state.selected;
   recallGuideIndex = 0;
@@ -1079,6 +1354,15 @@ function openRecall(stage = 'intro', sessionId = null) {
   if (stage !== 'simplify') resetRecallEvidence();
   activeSessionId = sessionId;
   recallStartedAt = Date.now();
+  if (stage === 'follow-up' && sessionId) {
+    activeSessionId = sessionId;
+    setRecallStage('complete');
+    document.getElementById('recall-modal').classList.remove('hidden');
+    setStep(3);
+    try { renderSessionFollowup(await api(`/api/study/sessions/${sessionId}`)); }
+    catch (error) { document.getElementById('session-followup-feedback').textContent = `无法恢复当前追问：${error.message}`; }
+    return;
+  }
   if (stage === 'simplify') {
     document.getElementById('simplify-input').value = '';
     setRecallStage('simplify');
@@ -1237,6 +1521,7 @@ async function saveRecall() {
     const gapChip = document.querySelector('.gap-card .empty-chip');
     gapChip.textContent = result.gaps.length ? `${result.gaps.length} 个待澄清点` : '本次讲解已保存';
     gapChip.dataset.diagnosed = 'true';
+    renderSessionFollowup(result);
     setRecallStage('complete');
     setStep(3);
   } catch (e) {
@@ -1297,6 +1582,68 @@ function openOutcomeNext() {
   const next = latestOutcome?.outcome?.recommended_next;
   closeRecall();
   if (next) selectConcept(next.path);
+}
+
+function renderSessionFollowup(details) {
+  const followup = details.followup || {};
+  const area = document.getElementById('session-followup');
+  area.classList.remove('hidden');
+  activeSessionId = details.session.id;
+  const labels = { clarify: '澄清当前回答', counterexample: '依据反例重新判断', hint: '带着一级提示继续', transfer: '换一个情境检验', limit: '本次追问已到轮数上限', complete: '当前追问已结束' };
+  document.getElementById('session-followup-title').textContent = labels[followup.stage] || '接续当前追问';
+  document.getElementById('session-followup-feedback').textContent = followup.feedback || (followup.source === 'local' ? '待核对：本地模式只检查表达结构。' : '');
+  document.getElementById('session-followup-task').textContent = followup.task || (followup.stage === 'limit' ? '未解决点已保留在学习记录中。' : followup.stage === 'complete' ? '本次过程和盲区处置历史已保存。' : '');
+  document.getElementById('session-followup-source').classList.toggle('hidden', !followup.source_excerpt);
+  document.getElementById('session-followup-source-state').textContent = `${followup.source_label || '待核对'}：${followup.source_message || '没有可验证的原文定位。'}`;
+  document.getElementById('session-followup-excerpt').textContent = followup.source_excerpt || '';
+  const sourceButton = document.getElementById('btn-session-followup-source');
+  sourceButton.dataset.pagePath = details.session.page_path;
+  sourceButton.dataset.sourceIndex = followup.source_status === 'locatable' ? followup.source_index ?? '' : '';
+  sourceButton.disabled = followup.source_status !== 'locatable';
+  sourceButton.textContent = followup.source_status === 'locatable' ? '回到原文定位' : '当前原文位置不可定位';
+  const input = document.getElementById('session-followup-answer');
+  const button = document.getElementById('btn-session-followup');
+  const pending = followup.pending_turn_id ? details.turns.find(turn => turn.idempotency_key === followup.pending_turn_id) : null;
+  input.dataset.pendingTurnId = followup.pending_turn_id || '';
+  const localDraft = storageGet(`feynman-followup:${state.workspace?.wiki_path || ''}:${details.session.id}`);
+  input.value = pending?.content || localDraft;
+  input.disabled = Boolean(pending) || !followup.task;
+  button.textContent = pending ? '重试本轮反馈' : '提交这一轮';
+  button.disabled = !pending && !followup.task;
+  document.getElementById('session-followup-history').innerHTML = details.turns
+    .filter(turn => ['prompt', 'followup_task', 'followup_answer', 'assessment'].includes(turn.kind))
+    .map(turn => {
+      const metadata = turn.metadata || {};
+      if (turn.kind === 'followup_task') return `<article><b>下一问</b><p>${esc(turn.content)}</p>${metadata.feedback ? `<p>${esc(metadata.feedback)}</p>` : ''}</article>`;
+      if (turn.kind === 'assessment') return `<article><b>反馈</b><p>${esc(metadata.feedback || turn.content)}</p></article>`;
+      return `<article><b>${turn.role === 'user' ? '你的回答' : '追问'}</b><p>${esc(turn.content)}</p></article>`;
+    }).join('');
+}
+
+async function submitSessionFollowup() {
+  if (!activeSessionId) return;
+  const input = document.getElementById('session-followup-answer');
+  const answer = input.value.trim();
+  if (!answer) { input.focus(); return; }
+  const button = document.getElementById('btn-session-followup');
+  button.disabled = true;
+  const idempotencyKey = input.dataset.pendingTurnId || crypto.randomUUID();
+  input.dataset.pendingTurnId = idempotencyKey;
+  storageSet(`feynman-followup:${state.workspace?.wiki_path || ''}:${activeSessionId}`, answer);
+  try {
+    const details = await api(`/api/study/sessions/${activeSessionId}/follow-ups`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ answer, idempotency_key: idempotencyKey }),
+    });
+    storageSet(`feynman-followup:${state.workspace?.wiki_path || ''}:${activeSessionId}`, '');
+    renderSessionFollowup(details);
+    document.getElementById('session-followup-answer').focus();
+  } catch (error) {
+    input.disabled = true;
+    button.textContent = '重试本轮反馈';
+    button.disabled = false;
+    document.getElementById('session-followup-feedback').textContent = `本轮未完成，回答已保留；重试时沿用原回答：${error.message}`;
+  }
 }
 
 function ensureOutcomeReflectionButton() {
@@ -1884,11 +2231,12 @@ function renderPracticeEvidence() {
   ].join('');
 }
 
-function practiceField(field) {
+function practiceField(field, answer) {
   const key = esc(field.key), label = esc(field.label);
-  if (field.type === 'boolean') return '<label class="field-label">' + label + '<select data-answer-field="' + key + '" data-answer-type="boolean" required><option value="">选择是或否</option><option value="true">是</option><option value="false">否</option></select></label>';
-  if (field.type === 'choice') return '<label class="field-label">' + label + '<select data-answer-field="' + key + '" data-answer-type="choice" required><option value="">请选择</option>' + field.options.map(x => '<option value="' + esc(x) + '">' + esc(x) + '</option>').join('') + '</select></label>';
-  return '<label class="field-label">' + label + '<input type="number" min="0" ' + (field.type === 'number' ? 'max="1" step="any"' : 'step="1"') + ' data-answer-field="' + key + '" data-answer-type="' + esc(field.type) + '" required></label>';
+  const saved = answer == null ? '' : String(answer);
+  if (field.type === 'boolean') return '<label class="field-label">' + label + '<select data-answer-field="' + key + '" data-answer-type="boolean" required><option value="">选择是或否</option><option value="true" ' + (saved === 'true' ? 'selected' : '') + '>是</option><option value="false" ' + (saved === 'false' ? 'selected' : '') + '>否</option></select></label>';
+  if (field.type === 'choice') return '<label class="field-label">' + label + '<select data-answer-field="' + key + '" data-answer-type="choice" required><option value="">请选择</option>' + field.options.map(x => '<option value="' + esc(x) + '" ' + (saved === x ? 'selected' : '') + '>' + esc(x) + '</option>').join('') + '</select></label>';
+  return '<label class="field-label">' + label + '<input type="number" min="0" value="' + esc(saved) + '" ' + (field.type === 'number' ? 'max="1" step="any"' : 'step="1"') + ' data-answer-field="' + key + '" data-answer-type="' + esc(field.type) + '" required></label>';
 }
 
 function practiceAttemptMarkup(a) {
@@ -1900,11 +2248,15 @@ function practiceAttemptMarkup(a) {
   ).join('');
   let content;
   if (a.submitted_at) {
+    const transitions = [
+      result.correction_task_key ? `<button class="btn btn-quiet" type="button" data-practice-task="${esc(result.correction_task_key)}">进入对应纠错练习</button>` : '',
+      result.next_variant_task_key ? `<button class="btn btn-quiet" type="button" data-practice-task="${esc(result.next_variant_task_key)}">做另一道情境变式</button>` : '',
+    ].filter(Boolean).join('');
     content = '<section class="practice-result"><b>' + (result.matches ? '结果匹配' : '结果需复查') + ' · ' + esc(practiceDate(a.submitted_at)) +
       '</b><p>' + esc(result.eligibility_reason || '') + ' 帮助程度：' + esc(a.assistance) + '；熟悉程度：' + esc(a.familiarity) + '（自述）。' +
-      (a.seen_before ? '重做原题。' : '') + '</p><div class="practice-components">' + components + '</div></section>';
+      (a.seen_before ? '重做原题。' : '') + '</p><div class="practice-components">' + components + '</div>' + (transitions ? '<div class="practice-actions">' + transitions + '</div>' : '') + '</section>';
   } else {
-    const fields = (t.fields || []).map(practiceField).join('');
+    const fields = (t.fields || []).map(field => practiceField(field, a.answer?.[field.key])).join('');
     const helpOptions = [
       ['none', '没有使用提示或解答'], ['allowed_docs', '查阅指定资料'],
       ['hint', '使用过提示'], ['unknown', '不确定'], ['solution', '已查看答案'],
@@ -1976,6 +2328,57 @@ function renderPracticePanel() {
   status.textContent = state.practiceNotice || ''; status.classList.remove('is-error'); status.classList.toggle('is-success', Boolean(state.practiceNotice));
 }
 
+function practiceDraftPayload(form) {
+  const answer = {};
+  form.querySelectorAll('[data-answer-field]').forEach(input => {
+    if (input.value !== '') answer[input.dataset.answerField] = input.value;
+  });
+  return { answer, assistance: form.elements.assistance?.value || state.practiceCurrent?.assistance || 'none' };
+}
+
+function savePracticeDraft(uid, payload) {
+  practiceDraftPromise = practiceDraftPromise.catch(() => null).then(async () => {
+    const saved = await api('/api/practice/attempts/' + encodeURIComponent(uid) + '/draft', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    if (state.practiceCurrent?.attempt_uid === uid) {
+      state.practiceCurrent = saved;
+      state.practiceNotice = '未提交答案已保存，可刷新后继续。';
+      const status = document.getElementById('practice-status');
+      status.textContent = state.practiceNotice;
+      status.classList.remove('is-error'); status.classList.add('is-success');
+    }
+    return saved;
+  }).catch(error => {
+    if (state.practiceCurrent?.attempt_uid === uid) showPracticeError(error.message, '草稿未保存，当前输入仍保留：');
+    return null;
+  });
+  return practiceDraftPromise;
+}
+
+function queuePracticeDraftSave(form) {
+  const uid = state.practiceCurrent?.attempt_uid;
+  if (!uid) return;
+  practiceDraftPending = { uid, payload: practiceDraftPayload(form) };
+  clearTimeout(practiceDraftTimer);
+  practiceDraftTimer = window.setTimeout(() => {
+    const pending = practiceDraftPending;
+    practiceDraftTimer = null; practiceDraftPending = null;
+    if (pending) savePracticeDraft(pending.uid, pending.payload);
+  }, 350);
+}
+
+function flushPracticeDraftSave(form) {
+  if (practiceDraftTimer) {
+    clearTimeout(practiceDraftTimer);
+    practiceDraftTimer = null;
+    const pending = { uid: state.practiceCurrent?.attempt_uid, payload: practiceDraftPayload(form) };
+    practiceDraftPending = null;
+    if (pending.uid) return savePracticeDraft(pending.uid, pending.payload);
+  }
+  return practiceDraftPromise;
+}
+
 async function loadPracticePanel() {
   if (!state.selected) return;
   try {
@@ -2002,12 +2405,17 @@ async function loadPracticePanel() {
   }
 }
 
-function openPracticePanel() {
+async function openPracticePanel(resumeUid = '') {
   if (!state.selected) return;
   state.practiceOpen = true; state.practiceNotice = '';
   document.getElementById('practice-panel').classList.remove('hidden');
   document.getElementById('btn-open-practice').setAttribute('aria-expanded', 'true');
-  loadPracticePanel();
+  await loadPracticePanel();
+  if (resumeUid) {
+    state.practiceCurrent = await api('/api/practice/attempts/' + encodeURIComponent(resumeUid));
+    state.practiceView = 'local';
+    renderPracticePanel();
+  }
 }
 
 function closePracticePanel() {
@@ -2824,10 +3232,10 @@ function renderReviewCards(cards) {
       <div class="review-feedback hidden"></div>
       ${card.can_show_reference ? `
         <section class="review-reference hidden">
-          <p><b>${esc(card.reference_label || 'Wiki 原文')}</b><br>${escapeMultiline(card.reference_excerpt)}</p>
+          <p><b>${esc(card.reference_label || 'Wiki 摘录')}</b><br><span class="source-state">${esc(card.current_source_label)}：${esc(card.current_source_message)}</span><br>${escapeMultiline(card.reference_excerpt)}</p>
           <h4>核对时必须覆盖的要点</h4>
           <ul>${(card.required_points || []).map(point => `<li>${esc(point)}</li>`).join('')}</ul>
-          <button class="text-btn review-open-source" type="button" data-source-path="${esc(card.page_path)}">回原文定位</button>
+          <button class="text-btn review-open-source" type="button" data-source-path="${esc(card.page_path)}" data-source-index="${card.current_source_status === 'locatable' ? card.source_index : ''}" ${card.current_source_status === 'locatable' ? '' : 'disabled'}>${card.current_source_status === 'locatable' ? '回原文定位' : '当前原文位置不可定位'}</button>
         </section>
         <button class="text-btn review-show-answer" type="button">查看 Wiki 参考与必备要点</button>` : `
         <section class="review-reference review-reference-pending hidden">
@@ -2917,7 +3325,7 @@ document.getElementById('review-card-stack').addEventListener('click', async (e)
   if (sourceButton?.dataset.sourcePath) {
     document.getElementById('review-modal').classList.add('hidden');
     await selectConcept(sourceButton.dataset.sourcePath);
-    document.getElementById('page-body').scrollIntoView({ block: 'start', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+    scrollToSourceBlock(sourceButton.dataset.sourceIndex);
     return;
   }
   const coach = e.target.closest('.review-coach-btn');
@@ -2944,7 +3352,7 @@ document.getElementById('review-card-stack').addEventListener('click', async (e)
       }[feedback.evidence_level] || '本次核对状态暂未确定。';
       const reviewTitle = feedback.evidence_level === 'source_reviewed' && feedback.verdict === 'pass' ? '依据资料核对通过' : '待核对';
       box.innerHTML = '<b>' + esc(feedback.agent_name) + ' · ' + reviewTitle + '</b><p>' + esc(feedback.feedback) + '</p><p>' +
-        esc(evidenceCopy) + '</p><p>下一问：' + esc(feedback.follow_up) + '</p>';
+        esc(evidenceCopy) + '</p><p>原文状态：' + esc(feedback.current_source_message || '待核对') + '</p><p>下一问：' + esc(feedback.follow_up) + '</p>';
     } catch (err) {
       item.querySelector('.review-feedback').innerHTML = `<p>${esc(err.message)}</p>`;
       item.querySelector('.review-feedback').classList.remove('hidden');
@@ -3355,10 +3763,17 @@ document.getElementById('practice-panel').addEventListener('change', event => {
       form.querySelector('.practice-task-info').innerHTML = practiceStartInfo(task);
       form.querySelector('button[type="submit"]').disabled = !task.open;
     }
+  } else if (event.target.matches('[data-answer-field], #practice-submit-form [name="assistance"]')) {
+    const form = event.target.closest('#practice-submit-form');
+    if (form) queuePracticeDraftSave(form);
   }
 });
+document.getElementById('practice-panel').addEventListener('input', event => {
+  const form = event.target.closest('#practice-submit-form');
+  if (form && event.target.matches('[data-answer-field]')) queuePracticeDraftSave(form);
+});
 document.getElementById('practice-panel').addEventListener('click', async event => {
-  const button = event.target.closest('[data-practice-action], [data-practice-resume]');
+  const button = event.target.closest('[data-practice-action], [data-practice-resume], [data-practice-task]');
   if (!button) return;
   if (button.dataset.practiceAction === 'list') {
     state.practiceCurrent = null; state.practiceNotice = ''; renderPracticePanel(); return;
@@ -3369,6 +3784,22 @@ document.getElementById('practice-panel').addEventListener('click', async event 
       state.practiceCurrent = await api('/api/practice/attempts/' + encodeURIComponent(state.practiceCurrent.attempt_uid) + '/solution', { method: 'POST' });
       state.practiceNotice = state.practiceCurrent.before_submission_notice || '';
       renderPracticePanel();
+    } catch (error) {
+      showPracticeError(error.message);
+      button.disabled = false;
+    }
+    return;
+  }
+  if (button.dataset.practiceTask) {
+    button.disabled = true;
+    try {
+      state.practiceSelectedTask = button.dataset.practiceTask;
+      state.practiceCurrent = await api('/api/practice/attempts', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ page_path: state.selected.path, task_key: state.practiceSelectedTask, mode: 'practice', familiarity: 'seen', assistance: 'hint' }),
+      });
+      state.practiceNotice = '纠错与变式仅作为练习记录，不计入独立验收。';
+      await loadPracticePanel();
     } catch (error) {
       showPracticeError(error.message);
       button.disabled = false;
@@ -3400,6 +3831,7 @@ document.getElementById('practice-panel').addEventListener('submit', async event
       });
       state.practiceNotice = '';
     } else if (form.id === 'practice-submit-form') {
+      await flushPracticeDraftSave(form);
       const answer = {};
       form.querySelectorAll('[data-answer-field]').forEach(input => {
         const type = input.dataset.answerType;
@@ -3478,6 +3910,33 @@ document.getElementById('btn-toggle-reference').addEventListener('click', () => 
   const body = document.getElementById('page-body');
   const expanded = body.classList.toggle('expanded');
   document.getElementById('btn-toggle-reference').textContent = expanded ? '收起完整资料' : '查看完整资料';
+});
+document.addEventListener('selectionchange', updateSelectionAction);
+document.getElementById('btn-record-selection').addEventListener('click', beginMicroRecall);
+document.getElementById('btn-resume-micro-recall').addEventListener('click', () => {
+  microPanelDismissed = false;
+  renderMicroRecall();
+  document.getElementById('micro-recall-question').focus();
+});
+document.getElementById('btn-close-micro-recall').addEventListener('click', () => {
+  microPanelDismissed = true;
+  renderMicroRecall();
+});
+document.getElementById('btn-save-micro-recall').addEventListener('click', saveMicroRecallNow);
+document.getElementById('btn-submit-micro-recall').addEventListener('click', submitMicroRecall);
+document.getElementById('micro-recall-question').addEventListener('input', queueMicroRecallSave);
+document.getElementById('micro-recall-answer').addEventListener('input', queueMicroRecallSave);
+document.getElementById('btn-session-followup').addEventListener('click', submitSessionFollowup);
+document.getElementById('btn-session-followup-source').addEventListener('click', async event => {
+  const button = event.currentTarget;
+  document.getElementById('recall-modal').classList.add('hidden');
+  await selectConcept(button.dataset.pagePath);
+  scrollToSourceBlock(button.dataset.sourceIndex);
+});
+document.getElementById('session-followup-answer').addEventListener('input', event => {
+  if (activeSessionId && !event.target.dataset.pendingTurnId) {
+    storageSet(`feynman-followup:${state.workspace?.wiki_path || ''}:${activeSessionId}`, event.target.value);
+  }
 });
 document.getElementById('btn-reading-settings').addEventListener('click', () => {
   const panel = document.getElementById('reading-settings');

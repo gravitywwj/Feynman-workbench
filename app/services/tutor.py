@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 
 from app.config import get_llm_config
 
@@ -778,6 +779,9 @@ def diagnose(
     explanation: str, title: str, reference_html: str, persona: str | None = None, uncertainty: str = "",
 ) -> tuple[list[dict], str, str]:
     """返回 (盲区, 下一问, 来源)，模型异常时不影响学习流程。"""
+    if not reference_html.strip():
+        gaps, question = local_diagnosis(explanation, title, uncertainty)
+        return gaps, question, "local"
     persona_spec = PERSONAS[normalize_persona(persona)]
     config = get_llm_config()
     if config.get("mode") != "ai" or not config["api_key"]:
@@ -797,6 +801,55 @@ def diagnose(
     except Exception:
         gaps, question = local_diagnosis(explanation, title, uncertainty)
         return gaps, question, "local"
+
+
+def assess_followup(
+    *, answer: str, question: str, gap: str, stage: str, source_excerpt: str, reference_status: str,
+) -> dict:
+    """Classify one reply; callers own the state transition and persistence."""
+    config = get_llm_config()
+    if config.get("mode") != "ai" or not config.get("api_key") or reference_status != "locatable":
+        stuck = bool(re.search(r"不知道|不會|不会|想不到|無法|无法|卡住|没思路|沒有思路", answer))
+        return {
+            "finding": "stuck" if stuck else "ambiguous",
+            "feedback": "待核对：本地模式只提示表达结构，不判断事实是否正确。",
+            "task": "先说出具体对象，再按顺序写出一个关键步骤或成立条件。",
+            "evidence_excerpt": "", "source": "local",
+        }
+    content = _call_llm(config, [
+        {"role": "system", "content": (
+            "你是资料约束下的追问教练。只依据给定摘录判断学习者这一轮的回答表现。"
+            "finding 只能是 ambiguous、misconception、stuck、sound。"
+            "ambiguous 表示对象或步骤不清；misconception 表示与资料矛盾；stuck 表示学习者无法继续；"
+            "sound 表示当前回答与摘录一致。misconception 和 sound 必须附带逐字摘录作为 evidence_excerpt。"
+            "sound 时 task 必须提出一个虚构的新情境，只检验同一规则的迁移，不添加外部事实。"
+            "每次只返回一个任务，不给标准答案。返回纯 JSON："
+            "{\"finding\":\"ambiguous|misconception|stuck|sound\",\"feedback\":\"一句反馈\","
+            "\"task\":\"一个任务\",\"evidence_excerpt\":\"摘录原句或空字符串\"}"
+        )},
+        {"role": "user", "content": (
+            f"当前阶段：{stage}\n当前问题：{question[:500]}\n待处理盲区：{gap[:500]}\n"
+            f"可用原文：{source_excerpt[:4000]}\n学习者回答：{answer[:5000]}"
+        )},
+    ])
+    payload = _clean_json(content)
+    finding = payload.get("finding")
+    feedback = payload.get("feedback")
+    task = payload.get("task")
+    quote = payload.get("evidence_excerpt", "")
+    if finding not in {"ambiguous", "misconception", "stuck", "sound"}:
+        raise ValueError("追问反馈类型无效")
+    if not all(isinstance(value, str) for value in (feedback, task, quote)):
+        raise ValueError("追问反馈格式无效")
+    feedback, task, quote = feedback.strip()[:300], task.strip()[:300], quote.strip()[:200]
+    if not feedback or not task:
+        raise ValueError("追问反馈不完整")
+    if finding in {"misconception", "sound"}:
+        def normalize(value: str) -> str:
+            return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", value)).strip()
+        if not quote or normalize(quote) not in normalize(source_excerpt):
+            raise ValueError("追问反馈引用了未提供的资料内容")
+    return {"finding": finding, "feedback": feedback, "task": task, "evidence_excerpt": quote, "source": "llm"}
 
 
 def summarize_reflections(reflections: list[dict]) -> tuple[str, str]:

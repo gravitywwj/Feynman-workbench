@@ -15,6 +15,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     duration_seconds INTEGER NOT NULL DEFAULT 0,
     evidence_json TEXT NOT NULL DEFAULT '[]', -- 学习者选择并在表达中体现的理解证据
     uncertainty TEXT NOT NULL DEFAULT '',     -- 学习者主动标记的最不确定点
+    followup_stage TEXT NOT NULL DEFAULT '',
+    target_gap_id INTEGER,
+    followup_help_level INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
@@ -24,7 +27,29 @@ CREATE TABLE IF NOT EXISTS turns (
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     role TEXT NOT NULL,                 -- user | tutor
     content TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'message',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    idempotency_key TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS micro_recalls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recall_uid TEXT NOT NULL UNIQUE,
+    page_path TEXT NOT NULL,
+    page_title TEXT NOT NULL,
+    source_index INTEGER NOT NULL,
+    source_heading TEXT NOT NULL DEFAULT '',
+    source_excerpt TEXT NOT NULL,
+    source_context_before TEXT NOT NULL DEFAULT '',
+    source_context_after TEXT NOT NULL DEFAULT '',
+    source_fingerprint TEXT NOT NULL,
+    question TEXT NOT NULL,
+    answer TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'draft',
+    session_id INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
 CREATE TABLE IF NOT EXISTS notes (
@@ -151,6 +176,12 @@ CREATE TABLE IF NOT EXISTS cards (
     answer TEXT NOT NULL,
     reference_status TEXT NOT NULL DEFAULT 'legacy', -- source | needs_review | legacy
     source_anchor TEXT NOT NULL DEFAULT '',
+    source_index INTEGER,
+    source_context TEXT NOT NULL DEFAULT '',
+    source_context_before TEXT NOT NULL DEFAULT '',
+    source_context_after TEXT NOT NULL DEFAULT '',
+    source_fingerprint TEXT NOT NULL DEFAULT '',
+    micro_recall_id INTEGER REFERENCES micro_recalls(id) ON DELETE SET NULL,
     required_points_json TEXT NOT NULL DEFAULT '[]',
     reference_excerpt TEXT NOT NULL DEFAULT '',
     interval INTEGER NOT NULL DEFAULT 0,  -- 当前间隔（天），0=未复习过
@@ -237,6 +268,7 @@ CREATE INDEX IF NOT EXISTS idx_gaps_session ON gaps(session_id);
 CREATE INDEX IF NOT EXISTS idx_self_assessments_updated ON self_assessments(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_cards_due ON cards(due);
 CREATE INDEX IF NOT EXISTS idx_cards_session ON cards(session_id);
+CREATE INDEX IF NOT EXISTS idx_micro_recalls_page ON micro_recalls(page_path, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_review_attempts_card ON review_attempts(card_id);
 CREATE INDEX IF NOT EXISTS idx_practice_attempts_page ON practice_attempts(page_path, submitted_at DESC);
 CREATE INDEX IF NOT EXISTS idx_practice_attempts_task ON practice_attempts(page_path, task_key, created_at);
@@ -275,10 +307,24 @@ def init_db() -> None:
             "duration_seconds": "INTEGER NOT NULL DEFAULT 0",
             "evidence_json": "TEXT NOT NULL DEFAULT '[]'",
             "uncertainty": "TEXT NOT NULL DEFAULT ''",
+            "followup_stage": "TEXT NOT NULL DEFAULT ''",
+            "target_gap_id": "INTEGER",
+            "followup_help_level": "INTEGER NOT NULL DEFAULT 0",
         }
         for name, definition in session_migrations.items():
             if name not in session_columns:
                 cur.execute(f"ALTER TABLE sessions ADD COLUMN {name} {definition}")
+
+        turn_columns = {row["name"] for row in cur.execute("PRAGMA table_info(turns)").fetchall()}
+        turn_migrations = {
+            "kind": "TEXT NOT NULL DEFAULT 'message'",
+            "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+            "idempotency_key": "TEXT",
+        }
+        for name, definition in turn_migrations.items():
+            if name not in turn_columns:
+                cur.execute(f"ALTER TABLE turns ADD COLUMN {name} {definition}")
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_idempotency ON turns(idempotency_key) WHERE idempotency_key IS NOT NULL")
 
         gap_columns = {row["name"] for row in cur.execute("PRAGMA table_info(gaps)").fetchall()}
         gap_migrations = {
@@ -297,12 +343,19 @@ def init_db() -> None:
         card_migrations = {
             "reference_status": "TEXT NOT NULL DEFAULT 'legacy'",
             "source_anchor": "TEXT NOT NULL DEFAULT ''",
+            "source_index": "INTEGER",
+            "source_context": "TEXT NOT NULL DEFAULT ''",
+            "source_context_before": "TEXT NOT NULL DEFAULT ''",
+            "source_context_after": "TEXT NOT NULL DEFAULT ''",
+            "source_fingerprint": "TEXT NOT NULL DEFAULT ''",
+            "micro_recall_id": "INTEGER REFERENCES micro_recalls(id) ON DELETE SET NULL",
             "required_points_json": "TEXT NOT NULL DEFAULT '[]'",
             "reference_excerpt": "TEXT NOT NULL DEFAULT ''",
         }
         for name, definition in card_migrations.items():
             if name not in card_columns:
                 cur.execute(f"ALTER TABLE cards ADD COLUMN {name} {definition}")
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_cards_micro_recall ON cards(micro_recall_id) WHERE micro_recall_id IS NOT NULL")
 
         attempt_columns = {row["name"] for row in cur.execute("PRAGMA table_info(review_attempts)").fetchall()}
         if "evidence_level" not in attempt_columns:

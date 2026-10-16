@@ -23,6 +23,25 @@ class SessionSimplify(BaseModel):
     elapsed_seconds: int = Field(default=0, ge=0, le=86400)
 
 
+class FollowupAnswer(BaseModel):
+    answer: str = Field(min_length=1, max_length=5000)
+    idempotency_key: str = Field(min_length=36, max_length=36)
+
+
+class MicroRecallCreate(BaseModel):
+    recall_uid: str = Field(min_length=36, max_length=36)
+    page_path: str = Field(min_length=1, max_length=2000)
+    source_index: int = Field(ge=0)
+    excerpt: str = Field(min_length=1, max_length=5000)
+    question: str = Field(min_length=1, max_length=300)
+    answer: str = Field(default="", max_length=5000)
+
+
+class MicroRecallUpdate(BaseModel):
+    question: str = Field(min_length=1, max_length=300)
+    answer: str = Field(default="", max_length=5000)
+
+
 class NoteSave(BaseModel):
     content: str = Field(max_length=10000)
 
@@ -142,6 +161,61 @@ def get_session(session_id: int) -> dict:
         return study_sessions.session_detail(session_id)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/sessions/{session_id}/follow-ups")
+def follow_up(session_id: int, payload: FollowupAnswer) -> dict:
+    try:
+        return study_sessions.advance_followup(session_id, payload.answer, payload.idempotency_key)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"本轮追问暂未完成，回答已保留，可使用原提交重试：{e}")
+
+
+@router.get("/micro-recalls")
+def micro_recalls(page_path: str = Query(..., min_length=1, max_length=2000)) -> dict:
+    return {"items": study_sessions.list_micro_recalls(page_path)}
+
+
+@router.post("/micro-recalls")
+def create_micro_recall(payload: MicroRecallCreate) -> dict:
+    try:
+        return {"recall": study_sessions.create_micro_recall(**payload.model_dump())}
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/micro-recalls/{recall_uid}")
+def get_micro_recall(recall_uid: str) -> dict:
+    try:
+        return {"recall": study_sessions.get_micro_recall(recall_uid)}
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.put("/micro-recalls/{recall_uid}")
+def update_micro_recall(recall_uid: str, payload: MicroRecallUpdate) -> dict:
+    try:
+        return {"recall": study_sessions.update_micro_recall(recall_uid, **payload.model_dump())}
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/micro-recalls/{recall_uid}/answer")
+def answer_micro_recall(recall_uid: str, payload: FollowupAnswer) -> dict:
+    try:
+        return study_sessions.submit_micro_recall_answer(recall_uid, payload.answer, payload.idempotency_key)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"本轮追问暂未完成，回答已保留，可使用原提交重试：{e}")
 
 
 @router.post("/sessions/{session_id}/simplify")

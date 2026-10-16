@@ -29,10 +29,15 @@ _VALIDATION_FIELDS = [
     {"key": "blocked_at", "label": "拦截阶段", "type": "choice", "options": ["schema", "whitelist"]},
     {"key": "violation", "label": "具体违规", "type": "choice", "options": ["query_type", "unknown_tool", "unknown_field"]},
 ]
+_VALIDATION_FIELDS_V2 = [
+    *[field for field in _VALIDATION_FIELDS if field["key"] != "violation"],
+    {"key": "violation", "label": "具体违规", "type": "choice", "options": ["query_type", "unknown_tool", "unknown_field", "invalid_json", "empty_query"]},
+]
 
-def _metric_task(key: str, phase: str, title: str, prompt: str, expected: dict) -> dict:
+
+def _metric_task(key: str, phase: str, title: str, prompt: str, expected: dict, task_version: int = 1) -> dict:
     return {
-        "task_key": key, "family": "metrics", "phase": phase, "title": title,
+        "task_key": key, "version": task_version, "family": "metrics", "phase": phase, "title": title,
         "prompt": prompt + " Precision = TP / (TP + FP)，Recall = TP / (TP + FN)。",
         "scope": "计算 precision 与 recall；不证明代码已执行。",
         "allowed_resources": "不查资料、不看解答；预计 3 分钟。",
@@ -43,16 +48,19 @@ def _metric_task(key: str, phase: str, title: str, prompt: str, expected: dict) 
     }
 
 
-def _validation_task(key: str, phase: str, title: str, prompt: str, expected: dict) -> dict:
+def _validation_task(
+    key: str, phase: str, title: str, prompt: str, expected: dict,
+    fields: list[dict] = _VALIDATION_FIELDS, task_version: int = 1,
+) -> dict:
     return {
-        "task_key": key, "family": "validation", "phase": phase, "title": title,
+        "task_key": key, "version": task_version, "family": "validation", "phase": phase, "title": title,
         "prompt": prompt + " 白名单只有 search_docs；arguments 必须是只含非空白字符串 query 的 JSON 对象；执行控制先查白名单，再解析并校验参数。",
         "scope": "区分 schema 校验与工具白名单检查；不会执行工具或代码。",
         "allowed_resources": "不查资料、不看解答；预计 4 分钟。",
         "estimated_minutes": 4, "page_paths": [
             "AI/foundation/python-api-basics.md", "AI/foundation/ai-practice-lab.md",
         ],
-        "fields": _VALIDATION_FIELDS, "expected": expected,
+        "fields": fields, "expected": expected,
     }
 
 
@@ -66,6 +74,24 @@ TASKS = (
     _metric_task("metrics-delayed", "delayed", "精确率与召回率：延迟变式", "应找到 {R,S,T}，实际返回 {S,T,U,V}。", {
         "tp": 2, "fp": 2, "fn": 1, "precision": 1 / 2, "recall": 2 / 3,
     }),
+    _metric_task("metrics-apply-audit", "application", "精确率与召回率：审计记录筛查", "审计任务应找到 {操作日志,权限变更,部署记录,数据导出}，实际返回 {操作日志,部署记录,告警规则}。", {
+        "tp": 2, "fp": 1, "fn": 2, "precision": 2 / 3, "recall": 1 / 2,
+    }, 2),
+    _metric_task("metrics-apply-screening", "application", "精确率与召回率：病例筛查", "金标准中有 5 个阳性病例 {A,B,C,D,E}，模型标记 {B,D,F}。按病例集合计算 TP、FP、FN、precision 与 recall。", {
+        "tp": 2, "fp": 1, "fn": 3, "precision": 2 / 3, "recall": 2 / 5,
+    }, 2),
+    _metric_task("metrics-transfer-fraud", "transfer", "精确率与召回率：交易欺诈复核", "复核目标是找出 {转账拆分,异地登录,设备接管}。系统报出 {异地登录,设备接管,夜间登录,新设备}。", {
+        "tp": 2, "fp": 2, "fn": 1, "precision": 1 / 2, "recall": 2 / 3,
+    }, 2),
+    _metric_task("metrics-transfer-logs", "transfer", "精确率与召回率：故障日志筛选", "应定位 {权限绕过,SQL 注入,错误泄露,审计缺口}，检索结果是 {SQL 注入,错误泄露,格式建议}。", {
+        "tp": 2, "fp": 1, "fn": 2, "precision": 2 / 3, "recall": 1 / 2,
+    }, 2),
+    _metric_task("metrics-delayed-incident", "delayed", "精确率与召回率：告警事件分诊", "事后核实的真实事件是 {队列阻塞,缓存过期,工作进程退出}；告警队列包含 {队列阻塞,工作进程退出,数据库延迟,重复告警}。", {
+        "tp": 2, "fp": 2, "fn": 1, "precision": 1 / 2, "recall": 2 / 3,
+    }, 2),
+    _metric_task("metrics-delayed-research", "delayed", "精确率与召回率：研究证据筛选", "问题要求找出 {具体对象,来源支持,适用边界}。摘要只提取到 {具体对象,来源支持,无依据的推广,无关背景}。", {
+        "tp": 2, "fp": 2, "fn": 1, "precision": 1 / 2, "recall": 2 / 3,
+    }, 2),
     _validation_task("validation-apply", "application", "工具调用校验：应用", '工具 search_docs；参数文本 {"query":7}。', {
         "json_parseable": True, "params_schema_valid": False, "tool_allowed": True,
         "execution_blocked": True, "blocked_at": "schema", "violation": "query_type",
@@ -78,6 +104,30 @@ TASKS = (
         "json_parseable": True, "params_schema_valid": False, "tool_allowed": True,
         "execution_blocked": True, "blocked_at": "schema", "violation": "unknown_field",
     }),
+    _validation_task("validation-apply-malformed", "application", "工具调用校验：损坏的 JSON", '收到工具 search_docs；参数文本只有 {"query":，判断解析和执行结果。', {
+        "json_parseable": False, "params_schema_valid": False, "tool_allowed": True,
+        "execution_blocked": True, "blocked_at": "schema", "violation": "invalid_json",
+    }, _VALIDATION_FIELDS_V2, 2),
+    _validation_task("validation-apply-empty-query", "application", "工具调用校验：空白查询", '收到工具 search_docs；参数文本 {"query":"   "}，判断空白字符串是否满足 schema。', {
+        "json_parseable": True, "params_schema_valid": False, "tool_allowed": True,
+        "execution_blocked": True, "blocked_at": "schema", "violation": "empty_query",
+    }, _VALIDATION_FIELDS_V2, 2),
+    _validation_task("validation-transfer-invalid-tool", "transfer", "工具调用校验：工具与参数同时无效", '白名单只有 search_docs；请求 delete_archive，参数文本为损坏的 {"query":。', {
+        "json_parseable": False, "params_schema_valid": False, "tool_allowed": False,
+        "execution_blocked": True, "blocked_at": "whitelist", "violation": "unknown_tool",
+    }, _VALIDATION_FIELDS_V2, 2),
+    _validation_task("validation-transfer-export", "transfer", "工具调用校验：越权导出请求", '白名单只有 search_docs；请求 export_private_files，参数文本 {"query":"全部资料"}。', {
+        "json_parseable": True, "params_schema_valid": True, "tool_allowed": False,
+        "execution_blocked": True, "blocked_at": "whitelist", "violation": "unknown_tool",
+    }, task_version=2),
+    _validation_task("validation-delayed-extra-field", "delayed", "工具调用校验：延迟复测额外字段", '工具 search_docs；参数文本 {"query":"权限记录","limit":100}，判断未声明字段的处理。', {
+        "json_parseable": True, "params_schema_valid": False, "tool_allowed": True,
+        "execution_blocked": True, "blocked_at": "schema", "violation": "unknown_field",
+    }, task_version=2),
+    _validation_task("validation-delayed-empty-query", "delayed", "工具调用校验：延迟复测空查询", '工具 search_docs；参数文本 {"query":"  "}，判断参数通过 schema 前是否允许执行。', {
+        "json_parseable": True, "params_schema_valid": False, "tool_allowed": True,
+        "execution_blocked": True, "blocked_at": "schema", "violation": "empty_query",
+    }, _VALIDATION_FIELDS_V2, 2),
 )
 _TASKS_BY_KEY = {task["task_key"]: task for task in TASKS}
 _PHASE_LABELS = {"application": "应用结果", "transfer": "首次变式结果", "delayed": "延迟结果"}
@@ -122,7 +172,7 @@ def _validate_page(page_path: str) -> dict:
 
 def _snapshot(task: dict) -> dict:
     return {
-        "task_key": task["task_key"], "task_version": VERSION, "family": task["family"],
+        "task_key": task["task_key"], "task_version": task.get("version", VERSION), "family": task["family"],
         "phase": task["phase"], "title": task["title"], "prompt": task["prompt"],
         "scope": task["scope"], "allowed_resources": task["allowed_resources"],
         "estimated_minutes": task["estimated_minutes"], "fields": task["fields"],
@@ -162,11 +212,11 @@ def _attempt_row(cur, uid: str):
 
 
 def _find_precursor(cur, page_path: str, family: str):
-    application = next(task for task in TASKS if task["family"] == family and task["phase"] == "application")
+    application_keys = [task["task_key"] for task in TASKS if task["family"] == family and task["phase"] == "application"]
     rows = cur.execute(
-        "SELECT * FROM practice_attempts WHERE page_path = ? AND task_key = ? AND kind = 'builtin' "
-        "AND submitted_at IS NOT NULL ORDER BY submitted_at DESC, id DESC",
-        (page_path, application["task_key"]),
+        "SELECT * FROM practice_attempts WHERE page_path = ? AND task_key IN (" + ",".join("?" for _ in application_keys) + ") "
+        "AND kind = 'builtin' AND submitted_at IS NOT NULL ORDER BY submitted_at DESC, id DESC",
+        (page_path, *application_keys),
     ).fetchall()
     for row in rows:
         result = _row_json(row, "result_json", {})
@@ -200,7 +250,8 @@ def list_tasks(page_path: str) -> dict:
                 continue
             state = _phase_state(cur, page_path, task)
             tasks.append({
-                "task_key": task["task_key"], "family": task["family"], "phase": task["phase"],
+                "task_key": task["task_key"], "task_version": task.get("version", VERSION),
+                "family": task["family"], "phase": task["phase"],
                 "title": task["title"], "scope": task["scope"],
                 "allowed_resources": task["allowed_resources"],
                 "estimated_minutes": task["estimated_minutes"], **state,
@@ -222,7 +273,7 @@ def _present(row, *, include_solution: bool = False) -> dict:
         "solution_viewed_at": row["solution_viewed_at"], "check_kind": row["check_kind"],
         "task": _public_task(snapshot) if row["kind"] == "builtin" else {"title": snapshot.get("title", "外部练习")},
         "source_url": row["source_url"], "artifact_text": row["artifact_text"],
-        "answer": answer if row["submitted_at"] else None,
+        "answer": answer if answer else None,
         "result": result if row["submitted_at"] else None,
     }
     if include_solution and row["kind"] == "builtin" and snapshot.get("expected") is not None:
@@ -253,7 +304,7 @@ def start_attempt(
         if active:
             raise ValueError("当前页面还有一题未提交；先继续或完成这次尝试")
         state = _phase_state(cur, page_path, task)
-        if not state["open"]:
+        if not state["open"] and not (mode == "practice" and task["phase"] == "transfer"):
             raise ValueError(state["reason"])
         if assistance == "allowed_docs" and "可查阅指定资料" not in task["allowed_resources"]:
             raise ValueError("这道题不允许查阅资料")
@@ -267,7 +318,7 @@ def start_attempt(
             "(attempt_uid, page_path, page_title, task_key, task_version, task_snapshot_json, kind, mode, phase, "
             "familiarity, seen_before, assistance, answer_json, result_json, check_kind, precursor_uid, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, 'builtin', ?, ?, ?, ?, ?, '{}', '{}', 'deterministic', ?, ?)",
-            (uid, page_path, page["title"], task_key, VERSION, _json(_snapshot(task)), mode, task["phase"],
+            (uid, page_path, page["title"], task_key, task.get("version", VERSION), _json(_snapshot(task)), mode, task["phase"],
              familiarity, int(prior > 0), assistance, precursor["attempt_uid"] if precursor else None, now),
         )
         row = cur.execute("SELECT * FROM practice_attempts WHERE attempt_uid = ?", (uid,)).fetchone()
@@ -280,6 +331,41 @@ def get_attempt(uid: str) -> dict:
         if not row:
             raise LookupError("自测记录不存在")
         return _present(row, include_solution=bool(row["solution_viewed_at"] or row["submitted_at"]))
+
+
+def save_attempt_draft(uid: str, answer: dict, assistance: str | None = None) -> dict:
+    """Persist an unfinished response without scoring it or creating evidence."""
+    if not isinstance(answer, dict) or (assistance is not None and assistance not in HELP_LEVELS):
+        raise ValueError("自测草稿格式不正确")
+    if len(_json(answer)) > 10000 or any(
+        not isinstance(key, str) or not isinstance(value, str) or len(value) > 5000
+        for key, value in answer.items()
+    ):
+        raise ValueError("自测草稿字段或长度不正确")
+    with db.cursor() as cur:
+        cur.execute("BEGIN IMMEDIATE")
+        row = _attempt_row(cur, uid)
+        if not row:
+            raise LookupError("自测记录不存在")
+        if row["kind"] != "builtin":
+            raise ValueError("外部练习没有本地题目草稿")
+        if row["submitted_at"]:
+            raise ConflictError("这次尝试已经提交，不能再修改答案")
+        snapshot = _row_json(row, "task_snapshot_json", {})
+        expected = snapshot.get("expected")
+        if not isinstance(expected, dict) or not set(answer).issubset(expected):
+            raise ValueError("自测草稿字段与题目不一致")
+        rank = {"none": 0, "allowed_docs": 1, "hint": 2, "unknown": 3, "solution": 4}
+        requested = assistance or row["assistance"]
+        help_level = "solution" if row["solution_viewed_at"] else max(
+            (row["assistance"], requested), key=lambda value: rank[value],
+        )
+        cur.execute(
+            "UPDATE practice_attempts SET answer_json = ?, assistance = ? WHERE attempt_uid = ? AND submitted_at IS NULL",
+            (_json(answer), help_level, uid),
+        )
+        updated = _attempt_row(cur, uid)
+    return _present(updated)
 
 
 def view_solution(uid: str) -> dict:
@@ -395,7 +481,7 @@ def submit_attempt(uid: str, answer: dict, assistance: str | None = None) -> dic
             raise ConflictError("这次尝试已经提交；相同编号不能替换答案。")
         task = _TASKS_BY_KEY.get(row["task_key"])
         snapshot = _row_json(row, "task_snapshot_json", {})
-        if not task or row["task_version"] != VERSION or snapshot != _snapshot(task):
+        if not task or row["task_version"] != task.get("version", VERSION) or snapshot != _snapshot(task):
             raise ValueError("题目版本无法核验，只能保留未核对记录")
         scored = _grade(task, answer)
         help_order = {"none": 0, "allowed_docs": 1, "hint": 2, "unknown": 3, "solution": 4}
@@ -409,6 +495,12 @@ def submit_attempt(uid: str, answer: dict, assistance: str | None = None) -> dic
             "eligible": eligible, "eligibility_reason": reason,
             "repeated": bool(row["seen_before"]), "assistance": help_level,
         }
+        transfer_tasks = [item for item in TASKS if item["family"] == task["family"] and item["phase"] == "transfer" and item["task_key"] != task["task_key"]]
+        if not scored["matches"]:
+            result["correction_task_key"] = task["task_key"]
+            result["correction_mode"] = "practice"
+        if transfer_tasks:
+            result["next_variant_task_key"] = transfer_tasks[0]["task_key"]
         submitted_at = _iso_now()
         updated = cur.execute(
             "UPDATE practice_attempts SET answer_json = ?, result_json = ?, assistance = ?, submitted_at = ? "
@@ -528,7 +620,7 @@ def import_preview(cur, attempts: list) -> dict:
         candidate = _TASKS_BY_KEY.get(str(item.get("task_key") or ""))
         if (
             item.get("kind") == "builtin" and type(item.get("task_version")) is int
-            and item["task_version"] == VERSION and candidate
+            and candidate and item["task_version"] == candidate.get("version", VERSION)
             and parsed["task_snapshot_json"] == _snapshot(candidate)
             and item["phase"] != candidate["phase"]
         ):
@@ -599,7 +691,7 @@ def import_attempts(cur, attempts: list) -> dict:
         task_key = str(item.get("task_key") or "")[:160]
         task_version = item.get("task_version") if type(item.get("task_version")) is int else 0
         candidate = _TASKS_BY_KEY.get(task_key)
-        task = candidate if item.get("kind") == "builtin" and candidate and task_version == VERSION and snapshot == _snapshot(candidate) else None
+        task = candidate if item.get("kind") == "builtin" and candidate and task_version == candidate.get("version", VERSION) and snapshot == _snapshot(candidate) else None
         # Unknown versions remain readable history, but their score and eligibility are discarded.
         known_kind = item.get("kind") if item.get("kind") in {"builtin", "external"} else "builtin"
         mode = item.get("mode") if item.get("mode") in {"practice", "assessment"} else "practice"

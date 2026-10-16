@@ -207,6 +207,117 @@ def test_mobile_primary_action_is_not_clipped(wiki):
 
 
 @pytest.mark.ui
+def test_inline_micro_recall_survives_refresh_and_home_followup(wiki):
+    screenshot_dir = Path("output/playwright")
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    page_path = wiki / "pages" / "AI" / "foundation" / "micro-recall-demo.md"
+    page_path.parent.mkdir(parents=True, exist_ok=True)
+    page_path.write_text(
+        "---\ntitle: Micro Recall Demo\ntype: concept\n---\n\n# Micro Recall Demo\n\n"
+        "This paragraph contains a verifiable source sentence about structured retrieval and explicit context.\n\n"
+        "A separate paragraph gives more context about the reading position.\n",
+        encoding="utf-8",
+    )
+    with run_server() as base_url, sync_playwright() as playwright:
+        browser = launch_browser(playwright)
+        page = browser.new_page(viewport={"width": 1280, "height": 900}, reduced_motion="reduce")
+        page.goto(base_url, wait_until="networkidle")
+        page.locator(".tree-dir", has_text="AI").click()
+        page.locator(".tree-dir", has_text="foundation").click()
+        page.locator("#concept-tree").get_by_text("Micro Recall Demo", exact=True).click()
+        source = page.locator("#page-body [data-source-block='1']")
+        source.select_text()
+        record_button = page.get_by_role("button", name="记录选中段落")
+        assert record_button.is_enabled()
+        record_button.focus()
+        page.keyboard.press("Enter")
+        panel = page.locator("#micro-recall-panel")
+        panel.wait_for(state="visible")
+        page.locator("#micro-recall-question").fill("为什么这一段强调显式上下文？")
+        page.wait_for_function("document.querySelector('#micro-recall-status').textContent.includes('问题草稿已保存')", timeout=5000)
+        with page.expect_response(lambda response: response.request.method == "PUT" and "/api/study/micro-recalls/" in response.url and response.status == 200):
+            page.locator("#micro-recall-answer").fill("上下文能限制检索范围，让返回内容对应当前问题。")
+        page.wait_for_function("document.querySelector('#micro-recall-answer').value.includes('限制检索范围')", timeout=5000)
+        assert not page.locator("#micro-recall-source").evaluate("node => node.open")
+        page.screenshot(path=str(screenshot_dir / "micro-recall-desktop.png"), full_page=True)
+
+        page.reload(wait_until="networkidle")
+        page.wait_for_function("document.querySelector('#home-action-title').textContent.includes('为什么这一段强调显式上下文？')")
+        page.locator("#btn-home-action").click()
+        page.wait_for_function("document.querySelector('#page-title').textContent.includes('Micro Recall Demo')")
+        panel = page.locator("#micro-recall-panel")
+        panel.wait_for(state="visible")
+        assert page.locator("#micro-recall-question").input_value() == "为什么这一段强调显式上下文？"
+        assert page.locator("#micro-recall-answer").input_value() == "上下文能限制检索范围，让返回内容对应当前问题。"
+        assert not page.locator("#micro-recall-source").evaluate("node => node.open")
+        with page.expect_response(lambda response: response.request.method == "POST" and response.url.endswith("/answer") and response.status == 200):
+            page.get_by_role("button", name="提交独立回答").click()
+        page.wait_for_function("!document.querySelector('#micro-recall-followup').classList.contains('hidden')")
+        assert "请具体说明" in page.locator("#micro-recall-task").inner_text()
+        assert page.locator("#micro-recall-source").evaluate("node => node.open")
+        page.screenshot(path=str(screenshot_dir / "micro-recall-answered.png"), full_page=True)
+
+        page.reload(wait_until="networkidle")
+        page.wait_for_function("document.querySelector('#home-action-title').textContent.includes('继续追问')", timeout=5000)
+        page.get_by_role("button", name="继续当前追问").click()
+        page.locator("#session-followup").wait_for(state="visible")
+        assert page.locator("#session-followup-task").inner_text()
+        page.locator("#session-followup-source summary").click()
+        assert "structured retrieval" in page.locator("#session-followup-excerpt").inner_text()
+
+        page.set_viewport_size({"width": 390, "height": 844})
+        drawer = page.locator("#concept-panel")
+        if drawer.evaluate("node => node.classList.contains('mobile-open')"):
+            page.locator("#btn-mobile-concept-drawer").click()
+        page.wait_for_function("!document.querySelector('#concept-panel').classList.contains('mobile-open')")
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        box = page.locator("#recall-modal .modal-card").bounding_box()
+        assert box is not None and box["x"] >= 0 and box["x"] + box["width"] <= 390
+        page.locator("#session-followup-answer").fill("上下文限制检索范围，让返回内容对应当前问题。")
+        with page.expect_response(lambda response: response.request.method == "POST" and "/follow-ups" in response.url and response.status == 200):
+            page.locator("#btn-session-followup").click()
+        page.wait_for_function("document.querySelector('#session-followup-history').textContent.includes('你的回答')")
+        page.screenshot(path=str(screenshot_dir / "micro-recall-mobile.png"), full_page=True)
+        browser.close()
+
+
+@pytest.mark.ui
+def test_home_resumes_unfinished_practice_with_saved_fields(wiki):
+    screenshot_dir = Path("output/playwright")
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    task = next(item for item in practice_sessions.TASKS if item["task_key"] == "metrics-apply")
+    page_path = task["page_paths"][0]
+    page_file = wiki / "pages" / page_path
+    page_file.parent.mkdir(parents=True, exist_ok=True)
+    page_file.write_text("---\ntitle: Evaluation Basics\ntype: concept\n---\n\n# Evaluation Basics\n", encoding="utf-8")
+    with run_server() as base_url, sync_playwright() as playwright:
+        browser = launch_browser(playwright)
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        attempt = page.request.post(f"{base_url}/api/practice/attempts", data={
+            "page_path": page_path, "task_key": task["task_key"], "mode": "assessment",
+            "familiarity": "unseen", "assistance": "none",
+        }).json()
+        page.goto(base_url, wait_until="networkidle")
+        page.wait_for_function("document.querySelector('#home-action-title').textContent.includes('继续自测')")
+        assert page.get_by_role("button", name="继续未完成自测").is_visible()
+        page.get_by_role("button", name="继续未完成自测").click()
+        page.locator("#practice-submit-form").wait_for(state="visible")
+        with page.expect_response(lambda response: response.request.method == "PUT" and response.url.endswith("/draft") and response.status == 200):
+            page.locator('[data-answer-field="tp"]').fill("2")
+            page.locator('[data-answer-field="fp"]').fill("1")
+        assert page.locator('[data-answer-field="tp"]').input_value() == "2"
+        assert page.locator('[data-answer-field="fp"]').input_value() == "1"
+        assert page.request.get(f"{base_url}/api/practice/attempts/{attempt['attempt_uid']}").json()["result"] is None
+        page.reload(wait_until="networkidle")
+        page.get_by_role("button", name="继续未完成自测").click()
+        page.locator("#practice-submit-form").wait_for(state="visible")
+        assert page.locator('[data-answer-field="tp"]').input_value() == "2"
+        assert page.locator('[data-answer-field="fp"]').input_value() == "1"
+        page.screenshot(path=str(screenshot_dir / "practice-resume.png"), full_page=True)
+        browser.close()
+
+
+@pytest.mark.ui
 def test_review_plan_starts_with_one_card_and_pauses_after_rating(wiki):
 
     from app import db

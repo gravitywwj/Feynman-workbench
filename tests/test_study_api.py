@@ -558,7 +558,7 @@ def test_reflections_are_timestamped_exported_and_can_be_summarized(wiki):
     assert summary.json()["summary_source"] in {"local", "llm"}
 
     exported = client.get("/api/study/export").json()
-    assert exported["version"] == 7
+    assert exported["version"] == 8
     assert len(exported["reflections"]) == 2
     assert exported["reflections"][0]["session_id"] == created["session"]["id"]
     preview = client.post("/api/study/import/preview", json={"payload": exported})
@@ -585,7 +585,7 @@ def test_due_card_can_be_reviewed(wiki):
     assert review.json()["interval"] == 3
 
 
-def test_review_summary_caps_today_plan_and_home_starts_with_one_card(wiki):
+def test_review_summary_caps_today_plan_and_home_resumes_saved_followup(wiki):
     client.put("/api/study/workspace", json={
         "mode": "local", "wiki_path": str(wiki), "diagnostic_mode": "local", "daily_review_goal": 2,
     })
@@ -605,8 +605,9 @@ def test_review_summary_caps_today_plan_and_home_starts_with_one_card(wiki):
     assert summary["next_card_estimated_minutes"] == 2
 
     home = client.get("/api/study/home").json()
-    assert home["type"] == "review"
-    assert "先用约 2 分钟完成这一张" in home["detail"]
+    assert home["type"] == "follow_up"
+    assert home["session_id"] == created["session"]["id"]
+    assert home["reason"] == "saved_followup"
 
     client.post(f"/api/study/reviews/{created['cards'][0]['id']}", json={"rating": "good"})
     after_one = client.get("/api/study/reviews/summary").json()

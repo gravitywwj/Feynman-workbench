@@ -170,6 +170,8 @@
           <div class="reference-actions">
             <button id="btn-reading-settings" class="text-btn" type="button" aria-expanded="false" aria-controls="reading-settings">阅读外观</button>
             <button id="btn-toggle-reference" class="text-btn" type="button">查看完整资料</button>
+            <button id="btn-record-selection" class="text-btn" type="button" disabled aria-controls="micro-recall-panel">记录选中段落</button>
+            <button id="btn-resume-micro-recall" class="text-btn hidden" type="button" aria-controls="micro-recall-panel">接续已保存问题</button>
           </div>
         </div>
         <div id="reading-settings" class="reading-settings hidden" aria-label="阅读外观设置">
@@ -201,6 +203,19 @@
           </div>
         </div>
         <article id="page-body" class="markdown-body reference-body"></article>
+        <section id="micro-recall-panel" class="micro-recall-panel hidden" aria-labelledby="micro-recall-title" aria-live="polite">
+          <div class="micro-recall-head"><div><p class="eyebrow">正文微回忆</p><h3 id="micro-recall-title">从这一段留下一个问题</h3></div><span id="micro-recall-source-state" class="source-chip">可定位</span></div>
+          <details id="micro-recall-source" class="micro-recall-source hidden"><summary>查看所选原文</summary><blockquote id="micro-recall-excerpt" class="micro-recall-excerpt"></blockquote><p id="micro-recall-source-message" class="source-state"></p></details>
+          <label class="field-label" for="micro-recall-question">问题<textarea id="micro-recall-question" rows="2" maxlength="300" placeholder="围绕这一段写一个具体问题"></textarea></label>
+          <div id="micro-recall-followup" class="micro-recall-followup hidden">
+            <p id="micro-recall-feedback" class="micro-recall-feedback" aria-live="polite"></p>
+            <p id="micro-recall-task" class="micro-recall-task"></p>
+          </div>
+          <label class="field-label" for="micro-recall-answer">先凭记忆回答<textarea id="micro-recall-answer" rows="4" maxlength="5000" placeholder="可以先保存问题，稍后再回答"></textarea></label>
+          <div class="micro-recall-actions"><button id="btn-save-micro-recall" class="btn btn-quiet" type="button">保存问题草稿</button><button id="btn-submit-micro-recall" class="btn btn-primary" type="button">提交独立回答</button><button id="btn-close-micro-recall" class="text-btn" type="button">收起</button></div>
+          <p id="micro-recall-status" class="focus-status" role="status" aria-live="polite"></p>
+          <details id="micro-recall-history" class="micro-recall-history hidden"><summary>查看本题记录</summary><div id="micro-recall-history-content"></div></details>
+        </section>
       </section>
 
       <section class="recall-ready-card" aria-labelledby="recall-ready-title">
@@ -483,6 +498,17 @@
         <div class="diagnosis-block"><b>下一次表达任务</b><p id="diagnosis-next-task"></p></div>
         <p id="diagnosis-confidence" class="diagnosis-confidence"></p>
         <div id="diagnosis-feedback" class="diagnosis-feedback hidden"><span>这次提示是否贴合你的表达？</span><button class="text-btn" data-diagnosis-feedback="helpful" type="button">有帮助</button><button class="text-btn" data-diagnosis-feedback="disputed" type="button">标记误判</button></div>
+      </section>
+      <section id="session-followup" class="session-followup" aria-labelledby="session-followup-title">
+        <p class="eyebrow">当前追问</p>
+        <h3 id="session-followup-title">正在恢复追问</h3>
+        <p id="session-followup-feedback" class="followup-feedback" aria-live="polite"></p>
+        <p id="session-followup-task" class="followup-task"></p>
+        <details id="session-followup-source" class="followup-source"><summary>查看本轮依据</summary><p id="session-followup-source-state" class="source-state"></p><blockquote id="session-followup-excerpt" class="micro-recall-excerpt"></blockquote><button id="btn-session-followup-source" class="text-btn" type="button">回到原文</button></details>
+        <label class="sr-only" for="session-followup-answer">回答当前追问</label>
+        <textarea id="session-followup-answer" maxlength="5000" rows="3" placeholder="针对当前问题回答；不知道时可以直接说明卡在哪里"></textarea>
+        <button id="btn-session-followup" class="btn btn-primary" type="button">提交这一轮</button>
+        <details class="followup-history"><summary>查看逐轮记录</summary><div id="session-followup-history"></div></details>
       </section>
       <button id="btn-start-simplify" class="btn btn-primary">补充后，用更简单的话再讲一次</button>
     </div>

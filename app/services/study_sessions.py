@@ -9,6 +9,7 @@ import re
 from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from uuid import UUID
 
 from app import config, db
 from app.services import (
@@ -107,70 +108,50 @@ def build_recall_brief(page_path: str, persona: str = "feynman") -> dict:
     )
 
 
-def _clean_card_source_line(line: str) -> str:
-    """Keep a small, human-readable piece of the connected Wiki as evidence."""
-    cleaned = line.strip()
-    cleaned = re.sub(r"^[-*+]\s+", "", cleaned)
-    cleaned = re.sub(r"^\d+[.)]\s+", "", cleaned)
-    cleaned = re.sub(r"!?(?:\[([^\]]+)\]\([^)]*\)|\[\[([^\]]+)\]\])", lambda match: match.group(1) or match.group(2) or "", cleaned)
-    cleaned = re.sub(r"[`*_>#]", "", cleaned)
-    return re.sub(r"\s+", " ", cleaned).strip(" -：")
-
-
-def _card_source_material(page_path: str, title: str) -> dict:
-    """Create an inspectable card reference from Wiki text, never learner prose."""
-    try:
-        _, body = wiki_reader.read_page_markdown(page_path)
-    except (FileNotFoundError, ValueError, OSError, UnicodeDecodeError):
-        return {
-            "reference_status": "needs_review",
-            "source_anchor": "原文不可读取",
-            "required_points": [],
-            "reference_excerpt": "",
-        }
-
-    anchor = title
-    points: list[str] = []
-    for raw_line in body.splitlines():
-        heading = re.match(r"^#{1,3}\s+(.+?)\s*$", raw_line.strip())
-        if heading:
-            anchor = _clean_card_source_line(heading.group(1)) or anchor
+def _card_source_material(blocks: list[dict], title: str, question: str) -> dict:
+    """Bind a card to one uniquely relevant Wiki block, never to arbitrary page text."""
+    terms = wiki_reader._search_terms(f"{title} {question}")
+    candidates = []
+    for block in blocks:
+        if block["kind"] == "heading" or not block["excerpt"] or len(block["excerpt"]) < 3:
             continue
-        point = _clean_card_source_line(raw_line)
-        if not point or point.startswith("相关：") or len(point) < 3 or point in points:
-            continue
-        points.append(point[:220])
-        if len(points) >= 3:
-            break
-    if not points:
+        content = block["excerpt"].lower()
+        heading = block["heading"].lower()
+        score = sum(min(content.count(term), 3) + 2 * bool(term in heading) for term in terms)
+        if score:
+            candidates.append((score, block))
+    candidates.sort(key=lambda item: (-item[0], item[1]["index"]))
+    if not candidates or (len(candidates) > 1 and candidates[0][0] == candidates[1][0]):
         return {
-            "reference_status": "needs_review",
-            "source_anchor": anchor,
-            "required_points": [],
-            "reference_excerpt": "",
+            "reference_status": "needs_review", "source_anchor": "相关原文待核对",
+            "source_index": None, "source_context": "", "source_context_before": "", "source_context_after": "", "source_fingerprint": "",
+            "required_points": [], "reference_excerpt": "",
         }
+    block = candidates[0][1]
+    context = "\n".join(value for value in (block["context_before"], block["context_after"]) if value)
     return {
-        "reference_status": "source",
-        "source_anchor": anchor,
-        "required_points": points,
-        "reference_excerpt": "\n".join(points),
+        "reference_status": "source", "source_anchor": block["heading"] or title,
+        "source_index": block["index"], "source_context": context,
+        "source_context_before": block["context_before"], "source_context_after": block["context_after"],
+        "source_fingerprint": block["fingerprint"],
+        "required_points": [block["excerpt"]], "reference_excerpt": block["excerpt"],
     }
 
 
 def _cards_for(page_path: str, title: str, gaps: list[dict]) -> list[dict]:
-    material = _card_source_material(page_path, title)
-    source_suffix = f"（回到「{material['source_anchor']}」核对）" if material["reference_status"] == "source" else "（资料待回原文核对）"
-    cards = [{
-        "question": f"用自己的话说明：{title} 的定义或目标，以及关键机制。{source_suffix}",
-        "answer": material["reference_excerpt"],
-        **material,
-    }]
+    try:
+        _, body = wiki_reader.read_page_markdown(page_path)
+        blocks = wiki_reader.source_blocks(body)
+    except (FileNotFoundError, ValueError, OSError, UnicodeDecodeError):
+        blocks = []
+    questions = [f"用自己的话说明：{title} 的定义或目标，以及关键机制。"]
     for gap in gaps[:2]:
-        cards.append({
-            "question": f"依据「{title}」的资料，回应这个待核对点：{gap['content']}",
-            "answer": material["reference_excerpt"],
-            **material,
-        })
+        questions.append(f"依据「{title}」的资料，回应这个待核对点：{gap['content']}")
+    cards = []
+    for question in questions:
+        material = _card_source_material(blocks, title, question)
+        source_suffix = f"（依据「{material['source_anchor']}」）" if material["reference_status"] == "source" else "（资料待核对）"
+        cards.append({"question": f"{question}{source_suffix}", "answer": material["reference_excerpt"], **material})
     return cards
 
 
@@ -189,32 +170,47 @@ def create_session(
         if evidence_keys is not None else tutor.inspect_understanding_evidence(explanation)
     )
     uncertainty = uncertainty.strip()[:300]
-    meta, reference_html = wiki_reader.render_page_html(page_path)
+    meta, body = wiki_reader.read_page_markdown(page_path)
     title = meta.get("title") or page_path.rsplit("/", 1)[-1].removesuffix(".md")
+    initial_source = _card_source_material(
+        wiki_reader.source_blocks(body), title,
+        f"用自己的话说明：{title} 的定义或目标，以及关键机制。",
+    )
+    reference_excerpt = initial_source["reference_excerpt"] if initial_source["reference_status"] == "source" else ""
     gaps, question, diagnosis_source = tutor.diagnose(
-        explanation, title, reference_html, persona, uncertainty,
+        explanation, title, reference_excerpt, persona, uncertainty,
     )
     today = date.today()
     with db.cursor() as cur:
         cur.execute(
-            "INSERT INTO sessions (page_path, page_title, concept, status, duration_seconds, evidence_json, uncertainty) "
-            "VALUES (?, ?, ?, 'gaps', ?, ?, ?)",
+            "INSERT INTO sessions (page_path, page_title, concept, status, duration_seconds, evidence_json, uncertainty, followup_stage) "
+            "VALUES (?, ?, ?, 'gaps', ?, ?, ?, 'clarify')",
             (page_path, title, title, max(0, elapsed_seconds), json.dumps(evidence["selected"], ensure_ascii=False), uncertainty),
         )
         session_id = cur.lastrowid
         cur.execute("INSERT INTO turns (session_id, role, content) VALUES (?, 'user', ?)", (session_id, explanation.strip()))
-        cur.execute("INSERT INTO turns (session_id, role, content) VALUES (?, 'tutor', ?)", (session_id, question))
+        cur.execute(
+            "INSERT INTO turns (session_id, role, content, kind, metadata_json) VALUES (?, 'tutor', ?, 'prompt', ?)",
+            (session_id, question, json.dumps({"stage": "clarify"}, ensure_ascii=False)),
+        )
+        first_gap_id = None
         for gap in gaps:
             cur.execute(
                 "INSERT INTO gaps (session_id, gap_type, content) VALUES (?, ?, ?)",
                 (session_id, gap["gap_type"], gap["content"]),
             )
+            if first_gap_id is None:
+                first_gap_id = cur.lastrowid
+        if first_gap_id is not None:
+            cur.execute("UPDATE sessions SET target_gap_id = ? WHERE id = ?", (first_gap_id, session_id))
         for card in _cards_for(page_path, title, gaps):
             cur.execute(
-                "INSERT INTO cards (session_id, question, answer, reference_status, source_anchor, required_points_json, reference_excerpt, due) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO cards (session_id, question, answer, reference_status, source_anchor, source_index, source_context, "
+                "source_context_before, source_context_after, source_fingerprint, required_points_json, reference_excerpt, due) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     session_id, card["question"], card["answer"], card["reference_status"], card["source_anchor"],
+                    card["source_index"], card["source_context"], card["source_context_before"], card["source_context_after"], card["source_fingerprint"],
                     json.dumps(card["required_points"], ensure_ascii=False), card["reference_excerpt"], review_schedule.initial_due(today),
                 ),
             )
@@ -238,25 +234,391 @@ def session_detail(session_id: int) -> dict:
         session = cur.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
         if not session:
             raise LookupError("学习会话不存在")
-        turns = cur.execute("SELECT id, role, content, created_at FROM turns WHERE session_id = ? ORDER BY id", (session_id,)).fetchall()
+        turns = cur.execute(
+            "SELECT id, role, content, kind, metadata_json, idempotency_key, created_at FROM turns WHERE session_id = ? ORDER BY id",
+            (session_id,),
+        ).fetchall()
         gaps = cur.execute(
             "SELECT id, gap_type, content, status, revision, practice_completed_at, retest_due, retest_prompt, retest_answer, retest_completed_at "
             "FROM gaps WHERE session_id = ? ORDER BY id", (session_id,)
         ).fetchall()
         cards = cur.execute(
-            "SELECT id, question, answer, reference_status, source_anchor, required_points_json, reference_excerpt, due, interval, reps "
-            "FROM cards WHERE session_id = ? ORDER BY id", (session_id,)
+            "SELECT cards.id, cards.question, cards.answer, cards.reference_status, cards.source_anchor, cards.source_index, "
+            "cards.source_context, cards.source_context_before, cards.source_context_after, cards.source_fingerprint, "
+            "cards.required_points_json, cards.reference_excerpt, cards.due, "
+            "cards.interval, cards.reps, cards.micro_recall_id, sessions.page_path FROM cards JOIN sessions ON sessions.id = cards.session_id "
+            "WHERE cards.session_id = ? ORDER BY cards.id", (session_id,)
         ).fetchall()
         feedback = cur.execute(
             "SELECT gap_id, verdict FROM diagnosis_feedback WHERE session_id = ? ORDER BY id", (session_id,)
         ).fetchall()
     gap_items = [_decorate_gap(row) for row in gaps]
+    card_items = _decorate_cards(cards)
     session_item = dict(session)
     session_item["evidence_keys"] = _decode_json(session_item.pop("evidence_json", "[]"), [])
-    return {
-        "session": session_item, "turns": db.rows_to_dicts(turns), "gaps": gap_items,
-        "cards": _decorate_cards(cards), "diagnosis_feedback": db.rows_to_dicts(feedback),
+    turn_items = db.rows_to_dicts(turns)
+    for turn in turn_items:
+        turn["metadata"] = _decode_json(turn.pop("metadata_json", "{}"), {})
+    latest_prompt = next((turn for turn in reversed(turn_items) if turn["role"] == "tutor"), None)
+    latest_task = latest_prompt if latest_prompt and latest_prompt["kind"] in {"prompt", "followup_task"} else None
+    user_keys = [turn["idempotency_key"] for turn in reversed(turn_items)
+                 if turn["role"] == "user" and turn.get("idempotency_key")]
+    response_keys = {turn.get("idempotency_key") for turn in turn_items if turn.get("idempotency_key")}
+    pending_key = next((key for key in user_keys if f"{key}:response" not in response_keys), None)
+    latest_feedback = next((turn["metadata"] for turn in reversed(turn_items)
+                            if turn["role"] == "tutor" and turn["metadata"].get("feedback")), {})
+    followup = {
+        "stage": session_item.get("followup_stage", ""),
+        "target_gap_id": session_item.get("target_gap_id"),
+        "help_level": session_item.get("followup_help_level", 0),
+        "task": latest_task["content"] if latest_task and session_item.get("followup_stage") not in {"complete", "limit"} else "",
+        "pending_turn_id": pending_key,
+        "feedback": latest_feedback.get("feedback", ""),
+        "finding": latest_feedback.get("finding", ""),
+        "source": latest_feedback.get("source", ""),
+        "evidence_excerpt": latest_feedback.get("evidence_excerpt", ""),
+        "active": session_item.get("followup_stage") not in {"", "complete"},
     }
+    target_position = next((index for index, gap in enumerate(gaps) if gap["id"] == session_item.get("target_gap_id")), -1)
+    source_card = card_items[min(len(card_items) - 1, target_position + 1)] if card_items and target_position >= 0 else card_items[0] if card_items else None
+    if source_card:
+        followup.update({
+            "source_anchor": source_card.get("source_anchor", ""),
+            "source_excerpt": source_card.get("reference_excerpt", ""),
+            "source_index": source_card.get("source_index"),
+            "source_status": source_card.get("current_source_status", "needs_review"),
+            "source_label": source_card.get("current_source_label", "待核对"),
+            "source_message": source_card.get("current_source_message", "没有可验证的原文定位。"),
+        })
+    return {
+        "session": session_item, "turns": turn_items, "gaps": gap_items,
+        "cards": card_items, "diagnosis_feedback": db.rows_to_dicts(feedback), "followup": followup,
+    }
+
+
+def _micro_recall_item(row) -> dict:
+    item = dict(row)
+    current = wiki_reader.source_status(
+        item["page_path"], item["source_index"], item["source_excerpt"], item["source_fingerprint"],
+        item["source_context_before"], item["source_context_after"],
+    )
+    item["current_source_status"] = current["status"]
+    item["current_source_label"] = current["label"]
+    item["current_source_message"] = current["message"]
+    return item
+
+
+def create_micro_recall(
+    recall_uid: str, page_path: str, source_index: int, excerpt: str, question: str, answer: str = "",
+) -> dict:
+    try:
+        UUID(recall_uid)
+    except (ValueError, TypeError, AttributeError):
+        raise ValueError("问题编号格式不正确") from None
+    question = question.strip()
+    if not question or len(question) > 300 or len(answer) > 5000:
+        raise ValueError("问题须为 1–300 个字符，回答最多 5000 个字符。")
+    source = wiki_reader.capture_source_block(page_path, source_index, excerpt)
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    with db.cursor() as cur:
+        cur.execute("BEGIN IMMEDIATE")
+        existing = cur.execute("SELECT * FROM micro_recalls WHERE recall_uid = ?", (recall_uid,)).fetchone()
+        if existing:
+            if (existing["page_path"] != page_path or existing["source_index"] != source_index
+                    or existing["source_excerpt"] != source["excerpt"] or existing["question"] != question):
+                raise ValueError("该问题编号已用于其他草稿内容。")
+            return _micro_recall_item(existing)
+        open_item = cur.execute(
+            "SELECT page_title FROM micro_recalls WHERE status IN ('draft', 'active') LIMIT 1",
+        ).fetchone()
+        if open_item:
+            raise ValueError(f"当前已有未完成的问题；请先接续「{open_item['page_title']}」中的问题。")
+        cur.execute(
+            "INSERT INTO micro_recalls (recall_uid, page_path, page_title, source_index, source_heading, source_excerpt, "
+            "source_context_before, source_context_after, source_fingerprint, question, answer, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)",
+            (recall_uid, page_path, source["page_title"], source_index, source["heading"], source["excerpt"],
+             source["context_before"], source["context_after"], source["fingerprint"], question, answer, now, now),
+        )
+        row = cur.execute("SELECT * FROM micro_recalls WHERE recall_uid = ?", (recall_uid,)).fetchone()
+    return _micro_recall_item(row)
+
+
+def get_micro_recall(recall_uid: str) -> dict:
+    with db.cursor() as cur:
+        row = cur.execute("SELECT * FROM micro_recalls WHERE recall_uid = ?", (recall_uid,)).fetchone()
+    if not row:
+        raise LookupError("微回忆记录不存在")
+    return _micro_recall_item(row)
+
+
+def list_micro_recalls(page_path: str) -> list[dict]:
+    with db.cursor() as cur:
+        rows = cur.execute(
+            "SELECT * FROM micro_recalls WHERE page_path = ? ORDER BY updated_at DESC, id DESC LIMIT 20", (page_path,),
+        ).fetchall()
+    return [_micro_recall_item(row) for row in rows]
+
+
+def update_micro_recall(recall_uid: str, question: str, answer: str) -> dict:
+    question, answer = question.strip(), answer
+    if not question or len(question) > 300 or len(answer) > 5000:
+        raise ValueError("问题须为 1–300 个字符，回答最多 5000 个字符。")
+    with db.cursor() as cur:
+        row = cur.execute("SELECT * FROM micro_recalls WHERE recall_uid = ?", (recall_uid,)).fetchone()
+        if not row:
+            raise LookupError("微回忆记录不存在")
+        if row["status"] == "draft":
+            cur.execute(
+                "UPDATE micro_recalls SET question = ?, answer = ?, updated_at = datetime('now', 'localtime') WHERE recall_uid = ?",
+                (question, answer, recall_uid),
+            )
+        elif row["status"] == "active":
+            if question != row["question"]:
+                raise ValueError("首次作答后，问题已进入学习记录，不能再修改。")
+            cur.execute(
+                "UPDATE micro_recalls SET answer = ?, updated_at = datetime('now', 'localtime') WHERE recall_uid = ?",
+                (answer, recall_uid),
+            )
+        else:
+            raise ValueError("已完成的问题不能再修改。")
+        row = cur.execute("SELECT * FROM micro_recalls WHERE recall_uid = ?", (recall_uid,)).fetchone()
+    return _micro_recall_item(row)
+
+
+def submit_micro_recall_answer(recall_uid: str, answer: str, idempotency_key: str) -> dict:
+    answer = answer.strip()
+    if not answer or len(answer) > 5000:
+        raise ValueError("请先填写回答，最多 5000 个字符。")
+    try:
+        UUID(idempotency_key)
+    except (ValueError, TypeError, AttributeError):
+        raise ValueError("提交编号格式不正确") from None
+    item = get_micro_recall(recall_uid)
+    if item["status"] == "draft":
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        with db.cursor() as cur:
+            cur.execute("BEGIN IMMEDIATE")
+            current = cur.execute("SELECT * FROM micro_recalls WHERE recall_uid = ?", (recall_uid,)).fetchone()
+            if current["status"] == "draft" and current["session_id"] is None:
+                cur.execute(
+                    "INSERT INTO sessions (page_path, page_title, concept, status, tutor_turns, followup_stage, uncertainty) "
+                    "VALUES (?, ?, ?, 'gaps', 3, 'clarify', '')",
+                    (current["page_path"], current["page_title"], current["page_title"]),
+                )
+                session_id = cur.lastrowid
+                cur.execute(
+                    "INSERT INTO gaps (session_id, gap_type, content) VALUES (?, 'concept_missing', ?)",
+                    (session_id, current["question"]),
+                )
+                gap_id = cur.lastrowid
+                cur.execute("UPDATE sessions SET target_gap_id = ? WHERE id = ?", (gap_id, session_id))
+                cur.execute(
+                    "INSERT INTO turns (session_id, role, content, kind, metadata_json) VALUES (?, 'tutor', ?, 'prompt', ?)",
+                    (session_id, current["question"], json.dumps({"stage": "clarify", "micro_recall_uid": recall_uid}, ensure_ascii=False)),
+                )
+                cur.execute(
+                    "INSERT INTO cards (session_id, question, answer, reference_status, source_anchor, source_index, source_context, "
+                    "source_context_before, source_context_after, source_fingerprint, micro_recall_id, required_points_json, reference_excerpt, due) "
+                    "VALUES (?, ?, ?, 'source', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (session_id, current["question"], current["source_excerpt"], current["source_heading"] or current["page_title"],
+                     current["source_index"], "\n".join(value for value in (current["source_context_before"], current["source_context_after"]) if value),
+                     current["source_context_before"], current["source_context_after"], current["source_fingerprint"], current["id"], json.dumps([current["source_excerpt"]], ensure_ascii=False),
+                     current["source_excerpt"], review_schedule.initial_due(date.today())),
+                )
+                cur.execute(
+                    "UPDATE micro_recalls SET status = 'active', session_id = ?, answer = ?, updated_at = ? "
+                    "WHERE id = ? AND status = 'draft' AND session_id IS NULL",
+                    (session_id, answer, now, current["id"]),
+                )
+            else:
+                cur.execute("UPDATE micro_recalls SET answer = ? WHERE recall_uid = ?", (answer, recall_uid))
+    else:
+        with db.cursor() as cur:
+            cur.execute("UPDATE micro_recalls SET answer = ?, updated_at = datetime('now', 'localtime') WHERE recall_uid = ?", (answer, recall_uid))
+    item = get_micro_recall(recall_uid)
+    if not item.get("session_id"):
+        raise ValueError("无法恢复此问题对应的学习会话。")
+    return advance_followup(item["session_id"], answer, idempotency_key)
+
+
+def advance_followup(session_id: int, answer: str, idempotency_key: str) -> dict:
+    answer = answer.strip()
+    if not answer or len(answer) > 5000:
+        raise ValueError("请先填写回答，最多 5000 个字符。")
+    try:
+        UUID(idempotency_key)
+    except (ValueError, TypeError, AttributeError):
+        raise ValueError("提交编号格式不正确") from None
+    response_key = f"{idempotency_key}:response"
+    target_id = None
+    with db.cursor() as cur:
+        cur.execute("BEGIN IMMEDIATE")
+        session = cur.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        if not session:
+            raise LookupError("学习会话不存在")
+        existing = cur.execute("SELECT * FROM turns WHERE idempotency_key = ?", (idempotency_key,)).fetchone()
+        if existing and (existing["session_id"] != session_id or existing["content"] != answer):
+            raise ValueError("该提交编号已用于其他回答。")
+        if cur.execute("SELECT 1 FROM turns WHERE idempotency_key = ?", (response_key,)).fetchone():
+            return session_detail(session_id)
+        if not existing:
+            if session["followup_stage"] in {"", "complete", "limit"}:
+                raise ValueError("当前会话没有可继续的追问任务。")
+            prior_keys = cur.execute(
+                "SELECT idempotency_key FROM turns WHERE session_id = ? AND role = 'user' "
+                "AND kind = 'followup_answer' AND idempotency_key IS NOT NULL ORDER BY id DESC",
+                (session_id,),
+            ).fetchall()
+            if any(not cur.execute(
+                "SELECT 1 FROM turns WHERE idempotency_key = ?", (f"{row['idempotency_key']}:response",),
+            ).fetchone() for row in prior_keys):
+                raise ValueError("上一轮反馈尚未完成；使用原提交继续重试。")
+            prompt = cur.execute(
+                "SELECT * FROM turns WHERE session_id = ? AND role = 'tutor' AND kind IN ('prompt', 'followup_task') "
+                "ORDER BY id DESC LIMIT 1", (session_id,),
+            ).fetchone()
+            if not prompt:
+                raise ValueError("会话没有可恢复的追问任务。")
+            cur.execute(
+                "INSERT OR IGNORE INTO turns (session_id, role, content, kind, metadata_json, idempotency_key) "
+                "VALUES (?, 'user', ?, 'followup_answer', ?, ?)",
+                (session_id, answer, json.dumps({"stage": session["followup_stage"], "help_level": session["followup_help_level"]}), idempotency_key),
+            )
+            existing = cur.execute("SELECT * FROM turns WHERE idempotency_key = ?", (idempotency_key,)).fetchone()
+            if not existing or existing["session_id"] != session_id or existing["content"] != answer:
+                raise ValueError("该提交编号已用于其他回答。")
+            cur.execute(
+                "UPDATE micro_recalls SET answer = ?, updated_at = datetime('now', 'localtime') WHERE session_id = ?",
+                (answer, session_id),
+            )
+            target = cur.execute("SELECT * FROM gaps WHERE id = ? AND session_id = ?", (session["target_gap_id"], session_id)).fetchone()
+            if not target:
+                target = cur.execute("SELECT * FROM gaps WHERE session_id = ? ORDER BY id LIMIT 1", (session_id,)).fetchone()
+            target_id = target["id"] if target else None
+            gap_text = target["content"] if target else session["page_title"]
+            micro = cur.execute("SELECT * FROM micro_recalls WHERE session_id = ? LIMIT 1", (session_id,)).fetchone()
+            card = None
+            if micro:
+                card = cur.execute("SELECT * FROM cards WHERE micro_recall_id = ?", (micro["id"],)).fetchone()
+            if not card:
+                gap_position = 0
+                if target:
+                    gap_position = cur.execute(
+                        "SELECT COUNT(*) FROM gaps WHERE session_id = ? AND id < ?", (session_id, target["id"]),
+                    ).fetchone()[0]
+                card = cur.execute(
+                    "SELECT * FROM cards WHERE session_id = ? ORDER BY id LIMIT 1 OFFSET ?",
+                    (session_id, gap_position + (1 if target else 0)),
+                ).fetchone()
+                if not card:
+                    card = cur.execute("SELECT * FROM cards WHERE session_id = ? ORDER BY id LIMIT 1", (session_id,)).fetchone()
+            source_card = dict(card) if card else {}
+            current_stage = session["followup_stage"]
+            current_task = prompt["content"]
+            source_status = wiki_reader.source_status(
+                session["page_path"], source_card.get("source_index"), source_card.get("reference_excerpt", ""),
+                source_card.get("source_fingerprint", ""), source_card.get("source_context_before", ""),
+                source_card.get("source_context_after", ""),
+            ) if source_card.get("reference_status") == "source" else {"status": "needs_review", "message": "沒有可驗證的摘录定位。"}
+            reference_text = "\n".join((source_card.get("source_context") or "", source_card.get("reference_excerpt") or ""))
+        else:
+            target = cur.execute("SELECT * FROM gaps WHERE id = ? AND session_id = ?", (session["target_gap_id"], session_id)).fetchone()
+            if not target:
+                target = cur.execute("SELECT * FROM gaps WHERE session_id = ? ORDER BY id LIMIT 1", (session_id,)).fetchone()
+            gap_text = target["content"] if target else session["page_title"]
+            prompt = cur.execute(
+                "SELECT * FROM turns WHERE session_id = ? AND role = 'tutor' AND kind IN ('prompt', 'followup_task') "
+                "ORDER BY id DESC LIMIT 1", (session_id,),
+            ).fetchone()
+            current_stage = session["followup_stage"]
+            current_task = prompt["content"] if prompt else ""
+            source_card = {}
+            micro = cur.execute("SELECT * FROM micro_recalls WHERE session_id = ? LIMIT 1", (session_id,)).fetchone()
+            if micro:
+                source_card = dict(cur.execute("SELECT * FROM cards WHERE micro_recall_id = ?", (micro["id"],)).fetchone() or {})
+            if not source_card:
+                source_card = dict(cur.execute("SELECT * FROM cards WHERE session_id = ? ORDER BY id LIMIT 1", (session_id,)).fetchone() or {})
+            source_status = wiki_reader.source_status(
+                session["page_path"], source_card.get("source_index"), source_card.get("reference_excerpt", ""),
+                source_card.get("source_fingerprint", ""), source_card.get("source_context_before", ""),
+                source_card.get("source_context_after", ""),
+            ) if source_card.get("reference_status") == "source" else {"status": "needs_review", "message": "没有可验证的摘录定位。"}
+            reference_text = "\n".join((source_card.get("source_context") or "", source_card.get("reference_excerpt") or ""))
+    if existing and not current_task:
+        raise ValueError("会话没有可恢复的追问任务。")
+    if existing and existing["role"] == "user":
+        turn_stage = _decode_json(existing["metadata_json"], {}).get("stage")
+        if turn_stage and turn_stage != current_stage:
+            raise ValueError("原提交所属阶段已改变；重新载入当前任务后再提交。")
+
+    try:
+        assessment = tutor.assess_followup(
+            answer=answer, question=current_task, gap=gap_text, stage=current_stage,
+            source_excerpt=reference_text, reference_status=source_status["status"],
+        )
+    except Exception as exc:
+        raise RuntimeError(f"追问反馈无效或暂不可用：{exc}") from exc
+    finding = assessment["finding"]
+    next_stage = finding
+    if finding == "ambiguous":
+        next_stage = "clarify"
+        next_task = f"请具体说明“{gap_text[:100]}”涉及的对象，以及一个关键步骤或成立条件。"
+    elif finding == "misconception":
+        next_stage = "counterexample"
+        next_task = f"资料依据：“{assessment['evidence_excerpt']}”。请依据这条内容重新判断：{gap_text[:100]}"
+    elif finding == "stuck":
+        next_stage = "hint"
+        next_task = f"一级提示：先指出「{source_card.get('source_anchor') or session['page_title']}」中的对象，再说出一个关键步骤或条件。"
+    else:
+        if current_stage == "transfer":
+            next_stage = "complete"
+            next_task = ""
+        else:
+            next_stage = "transfer"
+            next_task = assessment["task"]
+
+    with db.cursor() as cur:
+        cur.execute("BEGIN IMMEDIATE")
+        current = cur.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        if cur.execute("SELECT 1 FROM turns WHERE idempotency_key = ?", (response_key,)).fetchone():
+            return session_detail(session_id)
+        if current["followup_stage"] != current_stage:
+            raise ValueError("追问阶段已改变；重新载入当前任务后再提交。")
+        prompt_count = cur.execute(
+            "SELECT COUNT(*) FROM turns WHERE session_id = ? AND role = 'tutor' AND kind IN ('prompt', 'followup_task')",
+            (session_id,),
+        ).fetchone()[0]
+        if next_stage not in {"complete", "limit"} and prompt_count >= current["tutor_turns"]:
+            next_stage = "limit"
+            next_task = ""
+        feedback = assessment["feedback"]
+        if next_stage == "limit":
+            feedback += " 追问轮数已到上限；这个待核对点仍保留。"
+        if source_status["status"] != "locatable":
+            feedback += f" 原文状态：{source_status['message']}"
+        help_level = max(current["followup_help_level"], 1 if finding == "stuck" else 0)
+        response_kind = "followup_task" if next_task else "assessment"
+        metadata = {
+            "stage": next_stage, "finding": finding, "feedback": feedback,
+            "evidence_excerpt": assessment["evidence_excerpt"], "source": assessment["source"],
+            "source_status": source_status["status"], "help_level": help_level,
+            "answer_turn_id": existing["id"],
+        }
+        cur.execute(
+            "INSERT OR IGNORE INTO turns (session_id, role, content, kind, metadata_json, idempotency_key) VALUES (?, 'tutor', ?, ?, ?, ?)",
+            (session_id, next_task or feedback, response_kind, json.dumps(metadata, ensure_ascii=False), response_key),
+        )
+        if cur.rowcount:
+            cur.execute(
+                "UPDATE sessions SET followup_stage = ?, followup_help_level = ?, updated_at = datetime('now', 'localtime') WHERE id = ?",
+                (next_stage, help_level, session_id),
+            )
+            if next_stage == "complete":
+                cur.execute("UPDATE gaps SET status = 'revised' WHERE id = ? AND status = 'open'", (target_id,))
+                cur.execute("UPDATE sessions SET status = 'done' WHERE id = ?", (session_id,))
+                cur.execute("UPDATE micro_recalls SET status = 'complete' WHERE session_id = ?", (session_id,))
+    return session_detail(session_id)
 
 
 def complete_session(session_id: int, explanation: str, elapsed_seconds: int = 0) -> dict:
@@ -273,18 +635,22 @@ def complete_session(session_id: int, explanation: str, elapsed_seconds: int = 0
         reevaluated_gaps, _, reevaluation_source = tutor.diagnose(
             explanation, title, reference_html, uncertainty=str(session["uncertainty"] or ""),
         )
-        cur.execute("INSERT INTO turns (session_id, role, content) VALUES (?, 'revision', ?)", (session_id, explanation))
-        cur.execute("DELETE FROM gaps WHERE session_id = ? AND status = 'open'", (session_id,))
+        cur.execute("INSERT INTO turns (session_id, role, content, kind) VALUES (?, 'revision', ?, 'revision')", (session_id, explanation))
+        cur.execute(
+            "UPDATE gaps SET status = 'revised', revision = ? WHERE session_id = ? AND status = 'open'",
+            (explanation, session_id),
+        )
         for gap in reevaluated_gaps:
             cur.execute(
                 "INSERT INTO gaps (session_id, gap_type, content) VALUES (?, ?, ?)",
                 (session_id, gap["gap_type"], gap["content"]),
             )
         cur.execute(
-            "UPDATE sessions SET status = 'done', duration_seconds = MAX(duration_seconds, ?), "
+            "UPDATE sessions SET status = 'done', followup_stage = 'complete', duration_seconds = MAX(duration_seconds, ?), "
             "updated_at = datetime('now', 'localtime') WHERE id = ?",
             (max(0, elapsed_seconds), session_id),
         )
+        cur.execute("UPDATE micro_recalls SET status = 'complete' WHERE session_id = ? AND status = 'active'", (session_id,))
         cur.execute(
             "INSERT INTO learning_events (event_type, page_path, entity_id) VALUES ('session_done', ?, ?)",
             (session["page_path"], session_id),
@@ -315,7 +681,7 @@ def complete_session(session_id: int, explanation: str, elapsed_seconds: int = 0
         **detail,
         "outcome": {
             "strengths": second_structure["strengths"],
-            "remaining_gaps": [gap for gap in detail["gaps"] if gap["status"] != "verified"],
+            "remaining_gaps": [gap for gap in detail["gaps"] if gap["status"] == "open"],
             "first_explanation": first,
             "second_explanation": second,
             "improvements": improvements or ["结构信号没有新增；下一次回忆可继续检验是否更清楚、完整。"],
@@ -514,6 +880,49 @@ def today_action() -> dict:
             "type": "configure", "title": "先连接你的学习资料",
             "detail": "选择一个包含 pages 的本地 Wiki，或先用两分钟示例体验一次回忆表达。",
         }
+    concepts = wiki_reader.scan_concepts()
+    available_paths = {item["path"] for item in concepts}
+    with db.cursor() as cur:
+        draft = cur.execute(
+            "SELECT * FROM micro_recalls WHERE status = 'draft' ORDER BY updated_at DESC, id DESC LIMIT 1",
+        ).fetchone()
+    if draft and draft["page_path"] in available_paths:
+        return {
+            "type": "micro_recall", "title": draft["question"], "page_path": draft["page_path"],
+            "recall_uid": draft["recall_uid"], "source_index": draft["source_index"],
+            "detail": f"接续「{draft['source_heading'] or draft['page_title']}」中的未完成问题。",
+            "estimated_minutes": 3, "reason": "saved_micro_recall",
+        }
+    with db.cursor() as cur:
+        active_session = cur.execute(
+            "SELECT sessions.id, sessions.page_path, sessions.page_title, sessions.followup_stage, sessions.target_gap_id, "
+            "gaps.content AS gap FROM sessions LEFT JOIN gaps ON gaps.id = sessions.target_gap_id "
+            "WHERE sessions.followup_stage IN ('clarify', 'counterexample', 'hint', 'transfer', 'limit') "
+            "ORDER BY sessions.updated_at DESC, sessions.id DESC LIMIT 1",
+        ).fetchone()
+    if active_session and active_session["page_path"] in available_paths:
+        stage_labels = {"clarify": "澄清", "counterexample": "反例核对", "hint": "一级提示", "transfer": "迁移检验", "limit": "保留未解决点"}
+        return {
+            "type": "follow_up", "title": f"继续追问：{active_session['page_title']}",
+            "detail": f"当前阶段：{stage_labels[active_session['followup_stage']]}。{active_session['gap'] or '继续处理当前问题。'}",
+            "session_id": active_session["id"], "page_path": active_session["page_path"],
+            "estimated_minutes": 3, "reason": "saved_followup",
+        }
+    with db.cursor() as cur:
+        attempts = cur.execute(
+            "SELECT attempt_uid, page_path, page_title, task_key FROM practice_attempts "
+            "WHERE kind = 'builtin' AND submitted_at IS NULL ORDER BY created_at DESC, id DESC",
+        ).fetchall()
+    active_practice = next((row for row in attempts if row["page_path"] in available_paths), None)
+    if active_practice:
+        attempt = practice_sessions.get_attempt(active_practice["attempt_uid"])
+        task_title = attempt["task"].get("title") or active_practice["task_key"]
+        return {
+            "type": "practice_resume", "title": f"继续自测：{task_title}",
+            "detail": f"「{active_practice['page_title']}」中有一道未提交题目，已保存的答案会一并恢复。",
+            "page_path": active_practice["page_path"], "attempt_uid": active_practice["attempt_uid"],
+            "estimated_minutes": attempt["task"].get("estimated_minutes", 3), "reason": "saved_practice",
+        }
     focus = get_learning_focus()
     if focus and any(item["path"] == focus["page_path"] for item in wiki_reader.scan_concepts()):
         return {
@@ -595,12 +1004,22 @@ def _decorate_cards(rows: list) -> list[dict]:
         card["required_points"] = _decode_json(card.pop("required_points_json", "[]"), [])
         status = card.get("reference_status") or "legacy"
         card["reference_status"] = status
+        current = wiki_reader.source_status(
+            card.get("page_path", ""), card.get("source_index"), card.get("reference_excerpt", ""),
+            card.get("source_fingerprint", ""), card.get("source_context_before", ""), card.get("source_context_after", ""),
+        ) if status == "source" else {
+            "status": "needs_review", "label": "待核对", "message": "这条记录没有可验证的原文定位。",
+        }
+        card["current_source_status"] = current["status"]
+        card["current_source_label"] = current["label"]
+        card["current_source_message"] = current["message"]
         card["reference_label"] = {
-            "source": f"Wiki 原文 · {card.get('source_anchor') or '当前资料'}",
+            "source": f"Wiki 摘录 · {card.get('source_anchor') or '当前资料'}",
             "needs_review": "资料待核对",
             "legacy": "旧卡待回原文核对",
         }.get(status, "资料待核对")
         card["can_show_reference"] = status == "source" and bool(card.get("reference_excerpt"))
+        card["can_verify_reference"] = card["can_show_reference"] and current["status"] == "locatable"
         cards.append(card)
     return cards
 
@@ -711,14 +1130,15 @@ def assess_review_attempt(card_id: int, answer: str, agent: str) -> dict:
     if not row:
         raise LookupError("复习卡不存在")
     card = dict(row)
-    try:
-        _, reference_html = wiki_reader.render_page_html(card["page_path"])
-    except (FileNotFoundError, ValueError):
-        reference_html = ""
+    current = wiki_reader.source_status(
+        card["page_path"], card.get("source_index"), card.get("reference_excerpt", ""),
+        card.get("source_fingerprint", ""), card.get("source_context_before", ""), card.get("source_context_after", ""),
+    ) if card.get("reference_status") == "source" else {"status": "needs_review", "message": "无可验证定位"}
+    reference_html = "\n".join((card.get("source_context") or "", card.get("reference_excerpt") or ""))
     required_points = _decode_json(card.get("required_points_json"), [])
     verdict, feedback, follow_up, source, evidence_level = review_coach.assess(
         answer, question=card["question"], expected=card["answer"], required_points=required_points,
-        reference_status=card.get("reference_status") or "legacy", title=card["page_title"],
+        reference_status="source" if current["status"] == "locatable" else "needs_review", title=card["page_title"],
         reference_html=reference_html, agent=agent,
     )
     with db.cursor() as cur:
@@ -732,6 +1152,7 @@ def assess_review_attempt(card_id: int, answer: str, agent: str) -> dict:
         "id": attempt_id, "card_id": card_id, "agent": agent, "agent_name": review_coach.agent_profile(agent)["name"],
         "verdict": verdict, "feedback": feedback, "follow_up": follow_up, "source": source,
         "evidence_level": evidence_level, "reference_status": card.get("reference_status") or "legacy",
+        "current_source_status": current["status"], "current_source_message": current["message"],
     }
 
 
@@ -1198,14 +1619,14 @@ def export_learning_data() -> dict:
     tables = (
         "notes", "reflections", "sessions", "turns", "gaps", "cards", "reviews",
         "review_attempts", "learning_events", "diagnosis_feedback", "knowledge_updates", "self_assessments",
-        "wiki_revisions", "practice_attempts", "learning_focus",
+        "wiki_revisions", "practice_attempts", "learning_focus", "micro_recalls",
     )
     with db.cursor() as cur:
         payload = {
             table: db.rows_to_dicts(cur.execute(f"SELECT * FROM {table} ORDER BY {'page_path' if table == 'self_assessments' else 'id'}").fetchall())
             for table in tables
         }
-    return {"format": "feynman-workbench-export", "version": 7, "exported_at": datetime.now().isoformat(timespec="seconds"), **payload}
+    return {"format": "feynman-workbench-export", "version": 8, "exported_at": datetime.now().isoformat(timespec="seconds"), **payload}
 
 
 def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
@@ -1217,16 +1638,34 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
     """
     if payload.get("format") != "feynman-workbench-export":
         raise ValueError("这不是费曼学习工作台导出的学习数据")
-    if payload.get("version") not in {1, 2, 3, 4, 5, 6, 7}:
+    if payload.get("version") not in {1, 2, 3, 4, 5, 6, 7, 8}:
         raise ValueError("暂不支持该导出版本")
     names = (
         "notes", "reflections", "sessions", "turns", "gaps", "cards", "reviews",
         "review_attempts", "learning_events", "diagnosis_feedback", "knowledge_updates", "self_assessments",
-        "wiki_revisions", "practice_attempts", "learning_focus",
+        "wiki_revisions", "practice_attempts", "learning_focus", "micro_recalls",
     )
     source = {name: payload.get(name, []) for name in names}
     if any(not isinstance(value, list) for value in source.values()):
         raise ValueError("导出数据的结构不正确")
+    for item in source["micro_recalls"]:
+        path = item.get("page_path") if isinstance(item, dict) else None
+        try:
+            UUID(item.get("recall_uid", ""))
+        except (ValueError, TypeError, AttributeError):
+            raise ValueError("备份中的微回忆编号格式不正确。") from None
+        if (
+            not isinstance(path, str) or not path or len(path) > 2000 or Path(path).is_absolute()
+            or ".." in Path(path).parts or Path(path).suffix != ".md"
+            or type(item.get("source_index")) is not int or item["source_index"] < 0
+            or not isinstance(item.get("page_title"), str) or len(item["page_title"]) > 2000
+            or not isinstance(item.get("source_excerpt"), str) or not item["source_excerpt"] or len(item["source_excerpt"]) > 5000
+            or not isinstance(item.get("question"), str) or not item["question"].strip() or len(item["question"]) > 300
+            or not isinstance(item.get("answer"), str) or len(item["answer"]) > 5000
+            or not isinstance(item.get("source_fingerprint"), str) or not re.fullmatch(r"[a-f0-9]{64}", item["source_fingerprint"])
+            or item.get("status") not in {"draft", "active", "complete"}
+        ):
+            raise ValueError("备份中的微回忆内容格式不正确。")
     focus_rows = source["learning_focus"]
     if len(focus_rows) > 1:
         raise ValueError("备份中只能有一个当前学习重点。")
@@ -1256,7 +1695,7 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
     counts = {
         "notes": 0, "reflections": 0, "sessions": 0, "cards": 0, "events": 0,
         "knowledge_updates": 0, "wiki_revisions": 0, "self_assessments": 0,
-        "practice_attempts": 0, "learning_focus": 0,
+        "practice_attempts": 0, "learning_focus": 0, "micro_recalls": 0,
     }
     with db.cursor() as cur:
         practice_preview = practice_sessions.import_preview(cur, source["practice_attempts"])
@@ -1284,6 +1723,7 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
 
         session_map: dict[int, int] = {}
         new_source_session_ids: set[int] = set()
+        target_gap_sources: dict[int, int] = {}
         for session in source["sessions"]:
             old_id = session.get("id")
             page_path = str(session.get("page_path", ""))
@@ -1298,14 +1738,25 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
             if existing:
                 session_map[old_id] = existing["id"]
                 continue
+            followup_stage = str(session.get("followup_stage") or "")
+            if followup_stage not in {"", "clarify", "counterexample", "hint", "transfer", "complete", "limit"}:
+                followup_stage = ""
+            try:
+                help_level = max(0, min(3, int(session.get("followup_help_level") or 0)))
+            except (TypeError, ValueError):
+                help_level = 0
+            target_gap = session.get("target_gap_id")
+            if isinstance(target_gap, int):
+                target_gap_sources[old_id] = target_gap
             cur.execute(
-                "INSERT INTO sessions (page_path, page_title, concept, status, tutor_turns, duration_seconds, evidence_json, uncertainty, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO sessions (page_path, page_title, concept, status, tutor_turns, duration_seconds, evidence_json, uncertainty, "
+                "followup_stage, followup_help_level, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (page_path, page_title, str(session.get("concept") or page_title),
                  str(session.get("status") or "done"), int(session.get("tutor_turns") or 3), int(session.get("duration_seconds") or 0),
                  json.dumps(session.get("evidence_keys", session.get("evidence_json", [])), ensure_ascii=False)
                  if not isinstance(session.get("evidence_json"), str) else str(session.get("evidence_json") or "[]"),
                  str(session.get("uncertainty") or "")[:300],
+                 followup_stage, help_level,
                  created_at or datetime.now().isoformat(timespec="seconds"),
                  str(session.get("updated_at") or created_at or datetime.now().isoformat(timespec="seconds"))),
             )
@@ -1337,7 +1788,17 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
         for turn in source["turns"]:
             new_session = session_map.get(turn.get("session_id")) if turn.get("session_id") in new_source_session_ids else None
             if new_session and str(turn.get("content", "")).strip():
-                cur.execute("INSERT INTO turns (session_id, role, content) VALUES (?, ?, ?)", (new_session, str(turn.get("role") or "user"), str(turn["content"])))
+                metadata = turn.get("metadata_json", "{}")
+                if not isinstance(metadata, str):
+                    metadata = json.dumps(metadata, ensure_ascii=False)
+                key = turn.get("idempotency_key")
+                cur.execute(
+                    "INSERT OR IGNORE INTO turns (session_id, role, content, kind, metadata_json, idempotency_key, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (new_session, str(turn.get("role") or "user"), str(turn["content"]),
+                     str(turn.get("kind") or "message"), metadata, key, str(turn.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
+                )
+        gap_map: dict[int, int] = {}
         for gap in source["gaps"]:
             new_session = session_map.get(gap.get("session_id")) if gap.get("session_id") in new_source_session_ids else None
             if new_session and str(gap.get("content", "")).strip():
@@ -1349,19 +1810,67 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
                      gap.get("retest_due"), str(gap.get("retest_prompt") or "")[:1000], gap.get("retest_answer"),
                      gap.get("retest_completed_at")),
                 )
+                if isinstance(gap.get("id"), int):
+                    gap_map[gap["id"]] = cur.lastrowid
+        for old_session_id, old_gap_id in target_gap_sources.items():
+            new_gap_id = gap_map.get(old_gap_id)
+            if new_gap_id and old_session_id in new_source_session_ids:
+                cur.execute("UPDATE sessions SET target_gap_id = ? WHERE id = ?", (new_gap_id, session_map[old_session_id]))
+        micro_recall_map: dict[int, int] = {}
+        for recall in source["micro_recalls"]:
+            new_session = session_map.get(recall.get("session_id")) if isinstance(recall.get("session_id"), int) else None
+            if recall.get("status") in {"active", "complete"} and not new_session:
+                continue
+            existing = cur.execute("SELECT * FROM micro_recalls WHERE recall_uid = ?", (recall["recall_uid"],)).fetchone()
+            if existing:
+                if any(existing[key] != recall.get(key) for key in (
+                    "page_path", "source_index", "source_excerpt", "source_fingerprint", "question", "answer", "status",
+                )):
+                    raise ValueError("备份中的微回忆编号与现有记录冲突。")
+                if isinstance(recall.get("id"), int):
+                    micro_recall_map[recall["id"]] = existing["id"]
+                continue
+            cur.execute(
+                "INSERT INTO micro_recalls (recall_uid, page_path, page_title, source_index, source_heading, source_excerpt, "
+                "source_context_before, source_context_after, source_fingerprint, question, answer, status, session_id, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (recall["recall_uid"], recall["page_path"], recall["page_title"], recall["source_index"],
+                 str(recall.get("source_heading") or "")[:300], recall["source_excerpt"],
+                 str(recall.get("source_context_before") or "")[:5000], str(recall.get("source_context_after") or "")[:5000],
+                 recall["source_fingerprint"], recall["question"], recall["answer"], recall["status"], new_session,
+                 str(recall.get("created_at") or datetime.now().isoformat(timespec="seconds")),
+                 str(recall.get("updated_at") or recall.get("created_at") or datetime.now().isoformat(timespec="seconds"))),
+            )
+            new_recall_id = cur.lastrowid
+            if isinstance(recall.get("id"), int):
+                micro_recall_map[recall["id"]] = new_recall_id
+            counts["micro_recalls"] += 1
         for card in source["cards"]:
-            new_session = session_map.get(card.get("session_id")) if card.get("session_id") in new_source_session_ids else None
+            recall_id = micro_recall_map.get(card.get("micro_recall_id")) if isinstance(card.get("micro_recall_id"), int) else None
+            old_session = card.get("session_id")
+            new_session = session_map.get(old_session) if isinstance(old_session, int) and (
+                old_session in new_source_session_ids or recall_id is not None
+            ) else None
             old_id = card.get("id")
             if not new_session or not isinstance(old_id, int) or not str(card.get("question", "")).strip():
                 continue
+            if recall_id:
+                existing_card = cur.execute("SELECT id FROM cards WHERE micro_recall_id = ?", (recall_id,)).fetchone()
+                if existing_card:
+                    card_map[old_id] = existing_card["id"]
+                    continue
             cur.execute(
-                "INSERT INTO cards (session_id, question, answer, reference_status, source_anchor, required_points_json, reference_excerpt, interval, ease, due, reps) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO cards (session_id, question, answer, reference_status, source_anchor, source_index, source_context, "
+                "source_context_before, source_context_after, source_fingerprint, micro_recall_id, required_points_json, reference_excerpt, interval, ease, due, reps) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (new_session, str(card["question"]), str(card.get("answer") or ""),
                  str(card.get("reference_status") or "legacy"), str(card.get("source_anchor") or "")[:200],
+                 card.get("source_index"), str(card.get("source_context") or "")[:10000],
+                 str(card.get("source_context_before") or "")[:5000], str(card.get("source_context_after") or "")[:5000],
+                 str(card.get("source_fingerprint") or ""), recall_id,
                  json.dumps(card.get("required_points", card.get("required_points_json", [])), ensure_ascii=False)
                  if not isinstance(card.get("required_points_json"), str) else str(card.get("required_points_json") or "[]"),
-                 str(card.get("reference_excerpt") or "")[:1200], int(card.get("interval") or 0), float(card.get("ease") or 2.5),
+                 str(card.get("reference_excerpt") or "")[:5000], int(card.get("interval") or 0), float(card.get("ease") or 2.5),
                  str(card.get("due") or date.today().isoformat()), int(card.get("reps") or 0)),
             )
             card_map[old_id] = cur.lastrowid
@@ -1670,6 +2179,7 @@ def list_orphaned_records() -> list[dict]:
             "UNION ALL SELECT target_path, page_title, updated_at AS last_activity FROM knowledge_updates WHERE target_path IS NOT NULL"
             " UNION ALL SELECT page_path, page_path AS page_title, updated_at AS last_activity FROM self_assessments"
             " UNION ALL SELECT page_path, page_title, COALESCE(submitted_at, created_at) AS last_activity FROM practice_attempts"
+            " UNION ALL SELECT page_path, page_title, updated_at AS last_activity FROM micro_recalls"
             " UNION ALL SELECT page_path, page_title, updated_at AS last_activity FROM learning_focus"
             ") GROUP BY page_path"
         ).fetchall()
@@ -1695,8 +2205,9 @@ def relink_page(old_path: str, new_path: str) -> dict:
             "OR EXISTS(SELECT 1 FROM reflections WHERE page_path = ?) OR EXISTS(SELECT 1 FROM knowledge_updates WHERE page_path = ?) "
             "OR EXISTS(SELECT 1 FROM knowledge_updates WHERE target_path = ?) OR EXISTS(SELECT 1 FROM wiki_revisions WHERE page_path = ?) "
             "OR EXISTS(SELECT 1 FROM self_assessments WHERE page_path = ?) OR EXISTS(SELECT 1 FROM practice_attempts WHERE page_path = ?) "
+            "OR EXISTS(SELECT 1 FROM micro_recalls WHERE page_path = ?) "
             "OR EXISTS(SELECT 1 FROM learning_focus WHERE page_path = ?)",
-            (old_path, old_path, old_path, old_path, old_path, old_path, old_path, old_path, old_path),
+            (old_path, old_path, old_path, old_path, old_path, old_path, old_path, old_path, old_path, old_path),
         ).fetchone()[0]
         if not has_records:
             raise LookupError("旧页面没有可重新关联的学习记录。")
@@ -1715,6 +2226,7 @@ def relink_page(old_path: str, new_path: str) -> dict:
             "UPDATE practice_attempts SET page_path = ?, page_title = ? WHERE page_path = ?",
             (new_path, title, old_path),
         )
+        cur.execute("UPDATE micro_recalls SET page_path = ?, page_title = ? WHERE page_path = ?", (new_path, title, old_path))
         cur.execute("UPDATE learning_events SET page_path = ? WHERE page_path = ?", (new_path, old_path))
         cur.execute(
             "UPDATE learning_focus SET page_path = ?, page_title = ?, updated_at = ? WHERE page_path = ?",

@@ -1,8 +1,10 @@
 """费曼学习工作台 — Wiki 读取层（对 D:\\LLM wiki 只读，绝不写入）"""
+import hashlib
 import html
 import re
 import unicodedata
 from datetime import date, datetime, timedelta
+from html.parser import HTMLParser
 from pathlib import Path
 
 import bleach
@@ -231,7 +233,206 @@ SAFE_ATTRIBUTES = {
     "img": ["src", "alt", "title"],
     "span": ["class", "data-path", "data-target"],
     "code": ["class"],
+    "p": ["id", "data-source-block"],
+    "li": ["id", "data-source-block"],
+    "pre": ["id", "data-source-block"],
+    "table": ["id", "data-source-block"],
+    "h1": ["id", "data-source-block"],
+    "h2": ["id", "data-source-block"],
+    "h3": ["id", "data-source-block"],
+    "h4": ["id", "data-source-block"],
+    "h5": ["id", "data-source-block"],
+    "h6": ["id", "data-source-block"],
 }
+
+
+def _source_visible_text(source: str, kind: str) -> str:
+    if kind == "code":
+        return re.sub(r"\s+", " ", source).strip()
+    source = WIKILINK_RE.sub(lambda match: match.group(2) or match.group(1), source)
+    rendered = md.markdown(source, extensions=["fenced_code", "tables", "sane_lists"])
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", rendered))).strip()
+
+
+def _source_fingerprint(index: int, heading: str, raw: str, before: str, after: str) -> str:
+    value = "\n".join((str(index), heading, raw, before, after))
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def source_blocks(body: str) -> list[dict]:
+    """Split Wiki Markdown into stable, inspectable blocks used by cards and reading recall."""
+    lines = body.splitlines()
+    raw_blocks: list[dict] = []
+    heading = ""
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if not stripped:
+            i += 1
+            continue
+        match = re.match(r"^(#{1,6})\s+(.+?)\s*#*\s*$", stripped)
+        if match:
+            heading = re.sub(r"\s+", " ", match.group(2)).strip()
+            raw_blocks.append({"kind": "heading", "tag": f"h{len(match.group(1))}", "heading": heading,
+                               "raw": match.group(2), "start_line": i + 1})
+            i += 1
+            continue
+        fence = re.match(r"^\s*(```+|~~~+)", line)
+        if fence:
+            marker = fence.group(1)[0]
+            start = i
+            code = []
+            i += 1
+            while i < len(lines) and not re.match(rf"^\s*{re.escape(marker)}{{3,}}", lines[i]):
+                code.append(lines[i])
+                i += 1
+            if i < len(lines):
+                i += 1
+            raw_blocks.append({"kind": "code", "tag": "pre", "heading": heading,
+                               "raw": "\n".join(code), "start_line": start + 1})
+            continue
+        if "|" in line and i + 1 < len(lines) and re.match(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$", lines[i + 1]):
+            start = i
+            table = [line]
+            i += 2
+            while i < len(lines) and lines[i].strip() and "|" in lines[i]:
+                table.append(lines[i])
+                i += 1
+            raw_blocks.append({"kind": "table", "tag": "table", "heading": heading,
+                               "raw": "\n".join(table), "start_line": start + 1})
+            continue
+        if re.match(r"^\s*(?:[-+*]\s+|\d+[.)]\s+)", line):
+            start = i
+            item = [line]
+            i += 1
+            while i < len(lines) and lines[i].strip() and (
+                lines[i].startswith(("  ", "\t"))
+                and not re.match(r"^\s*(?:[-+*]\s+|\d+[.)]\s+)", lines[i])
+            ):
+                item.append(lines[i])
+                i += 1
+            raw_blocks.append({"kind": "list_item", "tag": "li", "heading": heading,
+                               "raw": "\n".join(item), "start_line": start + 1})
+            continue
+        start = i
+        paragraph = [line]
+        i += 1
+        while i < len(lines) and lines[i].strip() and not re.match(
+            r"^(?:#{1,6}\s|\s*(?:[-+*]\s+|\d+[.)]\s+|```+|~~~+))", lines[i],
+        ) and not ("|" in lines[i] and i + 1 < len(lines) and re.match(
+            r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$", lines[i + 1],
+        )):
+            paragraph.append(lines[i])
+            i += 1
+        raw_blocks.append({"kind": "paragraph", "tag": "p", "heading": heading,
+                           "raw": "\n".join(paragraph), "start_line": start + 1})
+
+    for index, block in enumerate(raw_blocks):
+        block["index"] = index
+        block["excerpt"] = _source_visible_text(block["raw"], block["kind"])
+    for index, block in enumerate(raw_blocks):
+        block["context_before"] = raw_blocks[index - 1]["excerpt"] if index else ""
+        block["context_after"] = raw_blocks[index + 1]["excerpt"] if index + 1 < len(raw_blocks) else ""
+        block["fingerprint"] = _source_fingerprint(
+            index, block["heading"], block["raw"], block["context_before"], block["context_after"],
+        )
+    return raw_blocks
+
+
+def capture_source_block(page_path: str, source_index: int, submitted_excerpt: str) -> dict:
+    """Return source text from disk after checking the browser's selected block."""
+    meta, body = read_page_markdown(page_path)
+    blocks = source_blocks(body)
+    if not isinstance(source_index, int) or not 0 <= source_index < len(blocks):
+        raise ValueError("资料位置已变化，请刷新页面后重新选择段落。")
+    block = blocks[source_index]
+    submitted = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", submitted_excerpt)).strip()
+    current = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", block["excerpt"])).strip()
+    if not submitted or submitted != current:
+        raise ValueError("所选摘录与当前 Wiki 原文不一致，请刷新页面后重新选择。")
+    return {"page_title": meta.get("title") or Path(page_path).stem, **block}
+
+
+def source_status(
+    page_path: str, source_index: int | None, excerpt: str, fingerprint: str,
+    context_before: str = "", context_after: str = "",
+) -> dict:
+    """Resolve a saved source snapshot without guessing when its location has changed."""
+    if source_index is None or not fingerprint or not excerpt:
+        return {"status": "needs_review", "label": "待核对", "message": "这条记录没有可验证的原文定位。"}
+    try:
+        _, body = read_page_markdown(page_path)
+    except (FileNotFoundError, OSError, UnicodeDecodeError, ValueError):
+        return {"status": "missing", "label": "原文缺失", "message": "保存摘录的 Wiki 页面已不可用。"}
+    blocks = source_blocks(body)
+    saved = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", excerpt)).strip()
+    matches = [block for block in blocks if block["excerpt"] == saved]
+    target = blocks[source_index] if 0 <= source_index < len(blocks) else None
+    if len(matches) > 1:
+        return {"status": "ambiguous", "label": "多处匹配", "message": "相同摘录出现在多处，无法确认原位置。"}
+    if target and target["excerpt"] == saved and target["fingerprint"] == fingerprint:
+        return {"status": "locatable", "label": "可定位", "message": "摘录与当前原文及上下文一致。", "source_index": source_index}
+    if matches:
+        return {"status": "changed", "label": "内容已变化", "message": "原文位置或前后内容已变化；本次不能据此核对。"}
+    if context_before and context_after:
+        removed = any(
+            blocks[index]["excerpt"] == context_before and blocks[index + 1]["excerpt"] == context_after
+            for index in range(len(blocks) - 1)
+        )
+    elif context_before:
+        removed = bool(blocks and blocks[-1]["excerpt"] == context_before)
+    elif context_after:
+        removed = bool(blocks and blocks[0]["excerpt"] == context_after)
+    else:
+        removed = False
+    if removed:
+        return {"status": "missing", "label": "原文缺失", "message": "保存的摘录已从原位置删除。"}
+    if target:
+        return {"status": "changed", "label": "内容已变化", "message": "原文位置或前后内容已变化；本次不能据此核对。"}
+    return {"status": "missing", "label": "原文缺失", "message": "保存的摘录已不在当前页面中。"}
+
+
+class _SourceAnchorParser(HTMLParser):
+    def __init__(self, blocks: list[dict]):
+        super().__init__(convert_charrefs=False)
+        self.by_tag: dict[str, list[int]] = {}
+        for block in blocks:
+            self.by_tag.setdefault(block["tag"], []).append(block["index"])
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        start = self.get_starttag_text() or f"<{tag}>"
+        indexes = self.by_tag.get(tag)
+        if indexes:
+            index = indexes.pop(0)
+            start = re.sub(r"\s+(?:id|data-source-block)\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)", "", start, flags=re.I)
+            start = start[:-1] + f' id="wiki-source-{index}" data-source-block="{index}">'
+        self.parts.append(start)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.parts.append(self.get_starttag_text() or f"<{tag}/>")
+
+    def handle_endtag(self, tag: str) -> None:
+        self.parts.append(f"</{tag}>")
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
+
+    def handle_entityref(self, name: str) -> None:
+        self.parts.append(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        self.parts.append(f"&#{name};")
+
+    def handle_comment(self, data: str) -> None:
+        self.parts.append(f"<!--{data}-->")
+
+
+def _anchor_source_html(rendered: str, blocks: list[dict]) -> str:
+    parser = _SourceAnchorParser(blocks)
+    parser.feed(rendered)
+    return "".join(parser.parts)
 
 
 def _wikilink_index(concepts: list[dict]) -> tuple[dict[str, str], dict[str, list[str]]]:
@@ -326,6 +527,7 @@ def render_page_html(path: str) -> tuple[dict, str]:
 
     body_html = WIKILINK_RE.sub(repl, body)
     rendered = md.markdown(body_html, extensions=["fenced_code", "tables", "sane_lists"])
+    rendered = _anchor_source_html(rendered, source_blocks(body))
     sanitized_html = bleach.clean(
         rendered, tags=SAFE_TAGS, attributes=SAFE_ATTRIBUTES, protocols=["http", "https", "mailto"]
     )

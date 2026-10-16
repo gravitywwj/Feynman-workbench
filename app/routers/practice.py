@@ -25,6 +25,11 @@ class AttemptSubmit(StrictModel):
     assistance: str | None = Field(default=None, pattern="^(none|allowed_docs|hint|solution|unknown)$")
 
 
+class AttemptDraft(StrictModel):
+    answer: dict
+    assistance: str | None = Field(default=None, pattern="^(none|allowed_docs|hint|solution|unknown)$")
+
+
 class ExternalAttempt(StrictModel):
     page_path: str = Field(min_length=1, max_length=2000)
     title: str = Field(min_length=1, max_length=160)
@@ -62,6 +67,11 @@ def start_attempt(payload: AttemptStart) -> dict:
 @router.get("/attempts/{uid}")
 def get_attempt(uid: str) -> dict:
     return _call(practice_sessions.get_attempt, uid)
+
+
+@router.put("/attempts/{uid}/draft")
+def save_attempt_draft(uid: str, payload: AttemptDraft) -> dict:
+    return _call(practice_sessions.save_attempt_draft, uid, payload.answer, payload.assistance)
 
 
 @router.post("/attempts/{uid}/solution")

@@ -53,6 +53,36 @@ def submit(uid, answer, **extra):
     return response.json()
 
 
+def test_unfinished_practice_draft_resumes_from_home_and_backup(wiki, monkeypatch):
+    add_task_pages(wiki)
+    task = next(task for task in practice_sessions.TASKS if task["phase"] == "application")
+    page_path = task["page_paths"][0]
+    attempt = start_attempt(page_path, task["task_key"])
+    field = task["fields"][0]
+    draft = {field["key"]: "0.5" if field["type"] == "number" else "2"}
+    invalid = client.put(f"/api/practice/attempts/{attempt['attempt_uid']}/draft", json={"answer": {"forged": "value"}})
+    assert invalid.status_code == 400
+    saved = client.put(f"/api/practice/attempts/{attempt['attempt_uid']}/draft", json={"answer": draft, "assistance": "none"})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["answer"] == draft
+    assert saved.json()["submitted_at"] is None and saved.json()["result"] is None
+    action = client.get("/api/study/home").json()
+    assert action["type"] == "practice_resume"
+    assert action["attempt_uid"] == attempt["attempt_uid"]
+    with db.cursor() as cur:
+        assert cur.execute("SELECT COUNT(*) FROM learning_events WHERE event_type = 'practice_submitted'").fetchone()[0] == 0
+
+    exported = export_learning_data()
+    target_db = wiki / "practice-draft-backup.db"
+    monkeypatch.setattr(db, "DB_PATH", target_db)
+    db.init_db()
+    imported = import_learning_data(exported)
+    assert imported["imported"]["practice_attempts"] == 1
+    restored = client.get(f"/api/practice/attempts/{attempt['attempt_uid']}").json()
+    assert restored["answer"] == draft
+    assert client.get("/api/study/home").json()["attempt_uid"] == attempt["attempt_uid"]
+
+
 def application_pass(page_path, family):
     task = next(item for item in practice_sessions.TASKS if item["family"] == family and item["phase"] == "application")
     attempt = start_attempt(page_path, task["task_key"])
@@ -60,7 +90,7 @@ def application_pass(page_path, family):
 
 
 @pytest.mark.parametrize("task", practice_sessions.TASKS, ids=lambda task: task["task_key"])
-def test_six_fixed_tasks_grade_correct_and_incorrect_answers_offline(wiki, monkeypatch, task):
+def test_eighteen_versioned_tasks_grade_correct_and_incorrect_answers_offline(wiki, monkeypatch, task):
     add_task_pages(wiki)
     clock = freeze_clock(monkeypatch)
     page_path = task["page_paths"][0]
@@ -93,6 +123,36 @@ def test_six_fixed_tasks_grade_correct_and_incorrect_answers_offline(wiki, monke
     retry = start_attempt(page_path, task["task_key"])
     failed = submit(retry["attempt_uid"], wrong)
     assert failed["result"]["matches"] is False
+
+
+def test_task_versions_and_phase_matrix_preserve_the_original_six(wiki):
+    assert len(practice_sessions.TASKS) == 18
+    for family in {task["family"] for task in practice_sessions.TASKS}:
+        for phase in practice_sessions.PHASES:
+            matching = [task for task in practice_sessions.TASKS if task["family"] == family and task["phase"] == phase]
+            assert len(matching) == 3
+    original = {"metrics-apply", "metrics-transfer", "metrics-delayed", "validation-apply", "validation-transfer", "validation-delayed"}
+    assert {task["task_key"] for task in practice_sessions.TASKS if task.get("version", 1) == 1} == original
+    assert all(task.get("version", 1) == 2 for task in practice_sessions.TASKS if task["task_key"] not in original)
+
+
+@pytest.mark.parametrize("task", practice_sessions.TASKS, ids=lambda task: task["task_key"])
+def test_each_task_keeps_attempt_open_after_illegal_answer(wiki, monkeypatch, task):
+    add_task_pages(wiki)
+    clock = freeze_clock(monkeypatch)
+    page_path = task["page_paths"][0]
+    if task["phase"] != "application":
+        application_pass(page_path, task["family"])
+        if task["phase"] == "delayed":
+            clock["now"] += timedelta(days=7)
+    attempt = start_attempt(page_path, task["task_key"])
+    illegal = dict(task["expected"])
+    illegal.pop(next(iter(illegal)))
+    rejected = client.post(f"/api/practice/attempts/{attempt['attempt_uid']}/submit", json={"answer": illegal})
+    assert rejected.status_code == 400
+    assert client.get(f"/api/practice/attempts/{attempt['attempt_uid']}").json()["submitted_at"] is None
+    passed = submit(attempt["attempt_uid"], task["expected"])
+    assert passed["result"]["matches"] is True
 
 
 def test_invalid_answers_and_untrusted_fields_do_not_complete_attempt(wiki):
@@ -353,7 +413,7 @@ def test_backup_versions_regrade_dedupe_and_reject_uid_conflicts(wiki, monkeypat
     transfer = start_attempt(linked_page, "metrics-transfer")
     submit(transfer["attempt_uid"], expected_for("metrics-transfer"))
     exported = export_learning_data()
-    assert exported["version"] == 7 and exported["practice_attempts"]
+    assert exported["version"] == 8 and exported["practice_attempts"]
     assert next(item for item in exported["practice_attempts"] if item["attempt_uid"] == transfer["attempt_uid"])["precursor_uid"] == application["attempt_uid"]
 
     roundtrip_db = wiki / "roundtrip.db"
@@ -370,7 +430,7 @@ def test_backup_versions_regrade_dedupe_and_reject_uid_conflicts(wiki, monkeypat
     target_db = wiki / "import-target.db"
     monkeypatch.setattr(db, "DB_PATH", target_db)
     db.init_db()
-    for version in range(1, 6):
+    for version in range(1, 8):
         old = import_learning_data({
             "format": exported["format"], "version": version,
             "notes": [{"page_path": f"legacy-{version}.md", "content": "legacy", "created_at": "2026-01-01", "updated_at": "2026-01-01"}],
