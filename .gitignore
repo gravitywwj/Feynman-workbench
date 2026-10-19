@@ -6,4 +6,5 @@ data/*.db
 data/workspace-settings.json
 data/llm-settings.json
 data/*.tmp
+data/course-sources/
 .env

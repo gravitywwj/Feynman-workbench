@@ -252,6 +252,56 @@ CREATE TABLE IF NOT EXISTS diagnosis_feedback (
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
+CREATE TABLE IF NOT EXISTS learning_lab_progress (
+    course_id TEXT NOT NULL,
+    course_version TEXT NOT NULL,
+    mission_key TEXT NOT NULL,
+    mission_version INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'not_started' CHECK (status IN ('not_started', 'in_progress', 'completed', 'needs_review')),
+    prediction TEXT NOT NULL DEFAULT '',
+    observation TEXT NOT NULL DEFAULT '',
+    explanation TEXT NOT NULL DEFAULT '',
+    code_text TEXT NOT NULL DEFAULT '',
+    code_sha256 TEXT NOT NULL DEFAULT '',
+    help_level INTEGER NOT NULL DEFAULT 0 CHECK (help_level BETWEEN 0 AND 4),
+    source TEXT NOT NULL DEFAULT 'local' CHECK (source IN ('local', 'imported')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    PRIMARY KEY (course_id, course_version, mission_key, mission_version)
+);
+
+CREATE TABLE IF NOT EXISTS learning_lab_attempts (
+    attempt_uid TEXT PRIMARY KEY,
+    course_id TEXT NOT NULL,
+    course_version TEXT NOT NULL,
+    mission_key TEXT NOT NULL,
+    mission_version INTEGER NOT NULL,
+    phase TEXT NOT NULL CHECK (phase IN ('practice', 'challenge', 'boss', 'delayed')),
+    status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'timed_out', 'cancelled', 'interrupted', 'imported')),
+    code_sha256 TEXT NOT NULL,
+    code_snapshot TEXT NOT NULL,
+    input_json TEXT NOT NULL DEFAULT '{}',
+    command_json TEXT NOT NULL DEFAULT '[]',
+    result_json TEXT NOT NULL DEFAULT '{}',
+    exit_code INTEGER,
+    grader_version TEXT NOT NULL DEFAULT '',
+    help_level INTEGER NOT NULL DEFAULT 0 CHECK (help_level BETWEEN 0 AND 4),
+    source TEXT NOT NULL DEFAULT 'local' CHECK (source IN ('local', 'imported')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS learning_lab_rewards (
+    reward_key TEXT PRIMARY KEY,
+    reward_uid TEXT NOT NULL UNIQUE,
+    course_id TEXT NOT NULL,
+    mission_key TEXT NOT NULL,
+    reward_type TEXT NOT NULL CHECK (reward_type IN ('mission', 'feynman', 'boss')),
+    xp INTEGER NOT NULL CHECK (xp > 0 AND xp <= 500),
+    attempt_uid TEXT,
+    source TEXT NOT NULL DEFAULT 'local' CHECK (source IN ('local', 'imported')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
 CREATE INDEX IF NOT EXISTS idx_notes_page_path ON notes(page_path);
@@ -274,6 +324,8 @@ CREATE INDEX IF NOT EXISTS idx_practice_attempts_page ON practice_attempts(page_
 CREATE INDEX IF NOT EXISTS idx_practice_attempts_task ON practice_attempts(page_path, task_key, created_at);
 CREATE INDEX IF NOT EXISTS idx_learning_events_created ON learning_events(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_diagnosis_feedback_session ON diagnosis_feedback(session_id);
+CREATE INDEX IF NOT EXISTS idx_learning_lab_attempts_mission ON learning_lab_attempts(course_id, mission_key, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_learning_lab_rewards_course ON learning_lab_rewards(course_id, created_at);
 """
 
 

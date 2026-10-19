@@ -413,7 +413,7 @@ def test_backup_versions_regrade_dedupe_and_reject_uid_conflicts(wiki, monkeypat
     transfer = start_attempt(linked_page, "metrics-transfer")
     submit(transfer["attempt_uid"], expected_for("metrics-transfer"))
     exported = export_learning_data()
-    assert exported["version"] == 8 and exported["practice_attempts"]
+    assert exported["version"] == 9 and exported["practice_attempts"]
     assert next(item for item in exported["practice_attempts"] if item["attempt_uid"] == transfer["attempt_uid"])["precursor_uid"] == application["attempt_uid"]
 
     roundtrip_db = wiki / "roundtrip.db"
@@ -430,7 +430,7 @@ def test_backup_versions_regrade_dedupe_and_reject_uid_conflicts(wiki, monkeypat
     target_db = wiki / "import-target.db"
     monkeypatch.setattr(db, "DB_PATH", target_db)
     db.init_db()
-    for version in range(1, 8):
+    for version in range(1, 9):
         old = import_learning_data({
             "format": exported["format"], "version": version,
             "notes": [{"page_path": f"legacy-{version}.md", "content": "legacy", "created_at": "2026-01-01", "updated_at": "2026-01-01"}],

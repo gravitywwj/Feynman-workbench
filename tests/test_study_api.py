@@ -558,7 +558,7 @@ def test_reflections_are_timestamped_exported_and_can_be_summarized(wiki):
     assert summary.json()["summary_source"] in {"local", "llm"}
 
     exported = client.get("/api/study/export").json()
-    assert exported["version"] == 8
+    assert exported["version"] == 9
     assert len(exported["reflections"]) == 2
     assert exported["reflections"][0]["session_id"] == created["session"]["id"]
     preview = client.post("/api/study/import/preview", json={"payload": exported})

@@ -336,6 +336,7 @@ def test_review_plan_starts_with_one_card_and_pauses_after_rating(wiki):
         page.goto(base_url, wait_until="networkidle")
         page.get_by_role("button", name="复习模块", exact=True).click()
         page.locator("#review-modal").wait_for(state="visible")
+        page.locator(".review-item").wait_for(state="visible")
         assert page.locator(".review-item").count() == 1
         assert "现在只做下一张" in page.locator("#review-progress").inner_text()
 

@@ -14,6 +14,7 @@ from uuid import UUID
 from app import config, db
 from app.services import (
     learning_recommendations,
+    learning_lab,
     mastery,
     practice_sessions,
     review_coach,
@@ -1620,13 +1621,20 @@ def export_learning_data() -> dict:
         "notes", "reflections", "sessions", "turns", "gaps", "cards", "reviews",
         "review_attempts", "learning_events", "diagnosis_feedback", "knowledge_updates", "self_assessments",
         "wiki_revisions", "practice_attempts", "learning_focus", "micro_recalls",
+        "learning_lab_progress", "learning_lab_attempts", "learning_lab_rewards",
     )
+    order_by = {
+        "self_assessments": "page_path",
+        "learning_lab_progress": "course_id, course_version, mission_key, mission_version",
+        "learning_lab_attempts": "attempt_uid",
+        "learning_lab_rewards": "reward_key",
+    }
     with db.cursor() as cur:
         payload = {
-            table: db.rows_to_dicts(cur.execute(f"SELECT * FROM {table} ORDER BY {'page_path' if table == 'self_assessments' else 'id'}").fetchall())
+            table: db.rows_to_dicts(cur.execute(f"SELECT * FROM {table} ORDER BY {order_by.get(table, 'id')}").fetchall())
             for table in tables
         }
-    return {"format": "feynman-workbench-export", "version": 8, "exported_at": datetime.now().isoformat(timespec="seconds"), **payload}
+    return {"format": "feynman-workbench-export", "version": 9, "exported_at": datetime.now().isoformat(timespec="seconds"), **payload}
 
 
 def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
@@ -1636,18 +1644,23 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
     creation time. Notes use their page path and only accept a strictly newer remote
     version. This keeps an import additive and safe enough for a local-first workflow.
     """
-    if payload.get("format") != "feynman-workbench-export":
+    if not isinstance(payload, dict) or payload.get("format") != "feynman-workbench-export":
         raise ValueError("这不是费曼学习工作台导出的学习数据")
-    if payload.get("version") not in {1, 2, 3, 4, 5, 6, 7, 8}:
+    version = payload.get("version")
+    if type(version) is not int or version not in {1, 2, 3, 4, 5, 6, 7, 8, 9}:
         raise ValueError("暂不支持该导出版本")
     names = (
         "notes", "reflections", "sessions", "turns", "gaps", "cards", "reviews",
         "review_attempts", "learning_events", "diagnosis_feedback", "knowledge_updates", "self_assessments",
         "wiki_revisions", "practice_attempts", "learning_focus", "micro_recalls",
+        "learning_lab_progress", "learning_lab_attempts", "learning_lab_rewards",
     )
     source = {name: payload.get(name, []) for name in names}
     if any(not isinstance(value, list) for value in source.values()):
         raise ValueError("导出数据的结构不正确")
+    learning_lab.validate_import_rows(
+        source["learning_lab_progress"], source["learning_lab_attempts"], source["learning_lab_rewards"],
+    )
     for item in source["micro_recalls"]:
         path = item.get("page_path") if isinstance(item, dict) else None
         try:
@@ -1696,14 +1709,19 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
         "notes": 0, "reflections": 0, "sessions": 0, "cards": 0, "events": 0,
         "knowledge_updates": 0, "wiki_revisions": 0, "self_assessments": 0,
         "practice_attempts": 0, "learning_focus": 0, "micro_recalls": 0,
+        "learning_lab_progress": 0, "learning_lab_attempts": 0, "learning_lab_rewards": 0,
     }
     with db.cursor() as cur:
         practice_preview = practice_sessions.import_preview(cur, source["practice_attempts"])
+        learning_lab_preview = learning_lab.import_preview(
+            cur, source["learning_lab_progress"], source["learning_lab_attempts"], source["learning_lab_rewards"],
+        )
     if dry_run:
         return {
             "dry_run": True,
             "incoming": {name: len(value) for name, value in source.items()},
             "practice": practice_preview,
+            "learning_lab": learning_lab_preview,
             "message": "导入只会补充不存在的会话，并在导入笔记更新更晚时合并笔记。",
         }
     with db.cursor() as cur:
@@ -2005,6 +2023,12 @@ def import_learning_data(payload: dict, *, dry_run: bool = False) -> dict:
             elif any(current[key] != focus[key] for key in ("page_path", "question", "checkpoint")):
                 # Keep the current problem; recover a conflicting checkpoint in the existing reflection history.
                 counts["reflections"] += int(_focus_reflection(cur, focus))
+        imported_lab = learning_lab.import_records(
+            cur, source["learning_lab_progress"], source["learning_lab_attempts"], source["learning_lab_rewards"],
+        )
+        counts["learning_lab_progress"] = imported_lab["progress"]
+        counts["learning_lab_attempts"] = imported_lab["attempts"]
+        counts["learning_lab_rewards"] = imported_lab["rewards"]
     return {"dry_run": False, "imported": counts, "message": "已合并导入数据，当前设备既有记录未被删除。"}
 
 

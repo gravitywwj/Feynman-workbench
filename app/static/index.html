@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>费曼学习工作台</title>
-<link rel="stylesheet" href="/static/style.css?v=20261015-learning-recommendations">
+<link rel="stylesheet" href="/static/style.css?v=20261018-ai-learning-lab">
 </head>
 <body>
 
@@ -30,6 +30,7 @@
       <button id="btn-theme-toggle" class="btn btn-quiet" type="button" aria-pressed="false">夜间阅读</button>
       <button id="btn-history" class="btn btn-quiet" type="button">学习记录</button>
       <button id="btn-ideas" class="btn btn-quiet" type="button">想法讨论</button>
+      <button id="btn-learning-lab" class="btn btn-quiet" type="button">AI 工程实验室</button>
       <button id="btn-graph" class="btn btn-quiet">知识图谱</button>
       <button id="btn-review" class="btn btn-quiet">复习模块</button>
       <button id="btn-workspace" class="btn btn-quiet" type="button">设置</button>
@@ -39,6 +40,7 @@
 </header>
 
 <nav id="mobile-menu" class="mobile-menu hidden" aria-label="更多功能">
+  <button id="btn-mobile-learning-lab" class="btn btn-quiet" type="button">AI 工程实验室</button>
   <button id="btn-mobile-history" class="btn btn-quiet" type="button">学习记录</button>
   <button id="btn-mobile-ideas" class="btn btn-quiet" type="button">想法讨论</button>
   <button id="btn-mobile-theme" class="btn btn-quiet" type="button">切换夜间阅读</button>
@@ -308,6 +310,108 @@
   <button id="btn-mobile-graph" class="mobile-nav-item" type="button">图谱</button>
   <button id="btn-mobile-review" class="mobile-nav-item" type="button">复习</button>
 </nav>
+
+<main id="learning-lab-view" class="learning-lab-view hidden" aria-labelledby="lab-course-title">
+  <header class="learning-lab-header">
+    <div>
+      <p class="eyebrow">AI ENGINEERING LEARNING LAB</p>
+      <h2 id="lab-course-title">Retrieval Evaluation Lab</h2>
+      <p id="lab-course-summary">固定课程版本的本地学习任务与草稿</p>
+    </div>
+    <button id="btn-learning-lab-close" class="btn btn-quiet" type="button">保存并返回</button>
+  </header>
+
+  <section id="lab-runner-status" class="lab-runner-status" role="status" aria-live="polite">
+    <strong>代码运行不可用</strong>
+    <span id="lab-runner-reason">本机 Windows 沙箱 P0 验证未通过；代码运行入口保持关闭。</span>
+  </section>
+
+  <section class="learning-lab-stats" aria-label="学习进度">
+    <div><span>等级</span><strong id="lab-level">1</strong></div>
+    <div><span>累计 XP</span><strong id="lab-xp">0</strong><small id="lab-imported-xp" class="lab-stat-note"></small></div>
+    <div class="lab-xp-progress"><span id="lab-level-progress-label">本级 0 / 500 XP</span><progress id="lab-level-progress" value="0" max="500">0%</progress></div>
+    <div><span>任务记录</span><strong id="lab-mission-progress">0 / 4</strong></div>
+  </section>
+
+  <div class="learning-lab-layout">
+    <aside class="panel lab-map" aria-label="Learning Map">
+      <div class="panel-head"><h3>Learning Map</h3><span class="badge">Agent Engineering</span></div>
+      <ol id="lab-mission-map" class="lab-mission-map"></ol>
+      <div class="lab-source-note">
+        <span class="eyebrow">课程来源</span>
+        <p id="lab-source-status">正在检查固定课程版本。</p>
+        <a id="lab-source-link" href="https://github.com/rohitg00/ai-engineering-from-scratch" target="_blank" rel="noreferrer">课程仓库与版本</a>
+      </div>
+    </aside>
+
+    <section class="panel lab-workspace" aria-label="任务与实验区">
+      <nav class="lab-tabs" aria-label="任务区域">
+        <button class="lab-tab active" type="button" data-lab-tab="task" aria-selected="true">任务</button>
+        <button class="lab-tab" type="button" data-lab-tab="experiment" aria-selected="false">实验</button>
+        <button class="lab-tab" type="button" data-lab-tab="record" aria-selected="false">记录</button>
+      </nav>
+
+      <div class="lab-selected-heading">
+        <div><p id="lab-mission-type" class="eyebrow">MISSION</p><h3 id="lab-mission-title">正在读取任务</h3></div>
+        <span id="lab-mission-status" class="lab-status">未开始</span>
+      </div>
+      <p id="lab-mission-adaptation" class="lab-adaptation"></p>
+
+      <section class="lab-panel-content" data-lab-panel="task">
+        <div class="lab-prompt-card"><span class="eyebrow">要弄清的问题</span><p id="lab-question"></p></div>
+        <div class="lab-prompt-card"><span class="eyebrow">任务验收范围</span><p id="lab-acceptance"></p></div>
+        <label class="lab-field-label" for="lab-prediction">运行前预测
+          <span id="lab-prediction-prompt" class="lab-field-hint"></span>
+          <textarea id="lab-prediction" rows="4" maxlength="3000" placeholder="先记录你预计看到的变化。"></textarea>
+        </label>
+        <details class="lab-course-material">
+          <summary>查看固定版本课程资料</summary>
+          <div id="lab-source-documents"></div>
+        </details>
+      </section>
+
+      <section class="lab-panel-content hidden" data-lab-panel="experiment">
+        <div class="lab-editor-heading"><div><span class="eyebrow">Python · main.py</span><p>草稿保存在工作台 SQLite；当前不会执行。</p></div><span class="badge">代码快照随草稿保存</span></div>
+        <label class="search-label" for="lab-code">实验代码</label>
+        <textarea id="lab-code" class="lab-code-editor" spellcheck="false" autocapitalize="off" autocomplete="off" maxlength="20000"></textarea>
+        <div class="lab-run-row">
+          <button id="btn-lab-run" class="btn btn-primary" type="button" disabled>运行固定测试</button>
+          <span id="lab-run-disabled-note">运行入口等待 Windows 沙箱 P0 验证。</span>
+        </div>
+      </section>
+
+      <section class="lab-panel-content hidden" data-lab-panel="record">
+        <label class="lab-field-label" for="lab-observation">实际观察
+          <span class="lab-field-hint">当前没有执行结果；记录来自你的手动观察时应明确这一点。</span>
+          <textarea id="lab-observation" rows="5" maxlength="5000" placeholder="记录结果、来源或尚未核对之处。"></textarea>
+        </label>
+        <label class="lab-field-label" for="lab-explanation">因果解释与未解决问题
+          <textarea id="lab-explanation" rows="6" maxlength="5000" placeholder="解释观察与预测的差异，并标出仍待验证的判断。"></textarea>
+        </label>
+        <label class="lab-field-label lab-help-level" for="lab-help-level">使用帮助程度
+          <select id="lab-help-level">
+            <option value="0">0 · 未记录额外帮助</option>
+            <option value="1">1 · 方向提示</option>
+            <option value="2">2 · 概念提示</option>
+            <option value="3">3 · 局部代码提示</option>
+            <option value="4">4 · 查看解法或应用 AI 补丁</option>
+          </select>
+          <span class="lab-field-hint">这是用户自述，不证明外部未使用帮助。</span>
+        </label>
+        <div class="lab-save-row">
+          <button id="btn-lab-save" class="btn btn-primary" type="button">保存任务记录</button>
+          <span id="lab-save-status" role="status" aria-live="polite">草稿尚未保存。</span>
+        </div>
+      </section>
+
+      <div id="lab-conflict" class="lab-conflict hidden" role="alert">
+        <p>保存版本已在其他窗口变化。当前输入仍保留在此处；复制后再载入已保存版本。</p>
+        <button id="btn-lab-conflict-download" class="btn btn-quiet" type="button">下载当前草稿副本</button>
+        <button id="btn-lab-conflict-reload" class="btn btn-quiet" type="button">载入已保存版本</button>
+      </div>
+    </section>
+  </div>
+</main>
 
 <div id="graph-view" class="hidden">
   <div class="graph-toolbar">
@@ -620,6 +724,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20261015-learning-recommendations"></script>
+<script src="/static/app.js?v=20261018-ai-learning-lab"></script>
+<script src="/static/learning-lab.js?v=20261018-ai-learning-lab"></script>
 </body>
 </html>

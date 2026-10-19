@@ -15,6 +15,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 DATA_DIR = Path(os.environ.get("FEYNMAN_DATA_DIR", BASE_DIR / "data"))
 DB_PATH = Path(os.environ.get("FEYNMAN_DB_PATH", DATA_DIR / "feynman.db"))
+AI_ENGINEERING_COURSE_PATH = Path(
+    os.environ.get("FEYNMAN_AI_ENGINEERING_COURSE_PATH")
+    or DATA_DIR / "course-sources" / "ai-engineering-from-scratch-467969391fee2b42f8c9d556a2be7802567a6a15"
+)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 DEMO_WIKI_DIR = Path(__file__).resolve().parent / "demo_wiki"
 SETTINGS_PATH = DATA_DIR / "workspace-settings.json"

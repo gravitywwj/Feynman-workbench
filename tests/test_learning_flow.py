@@ -186,7 +186,7 @@ def test_backup_v8_restores_micro_recall_session_source_and_stage(wiki, monkeypa
     response = study_sessions.submit_micro_recall_answer(uid, "不知道。", str(uuid4()))
     assert response["followup"]["stage"] == "hint"
     exported = study_sessions.export_learning_data()
-    assert exported["version"] == 8
+    assert exported["version"] == 9
     assert exported["micro_recalls"][0]["source_context_before"] == created["source_context_before"]
     assert exported["sessions"][0]["followup_stage"] == "hint"
 

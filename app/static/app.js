@@ -1000,15 +1000,18 @@ async function openNotes() {
   document.getElementById('notes-topic').textContent = `关联知识点：${title}`;
   const input = document.getElementById('note-input');
   input.value = storageGet(noteKey(path));
+  const initialValue = input.value;
   document.getElementById('notes-status').textContent = '正在读取笔记…';
   document.getElementById('notes-modal').classList.remove('hidden');
   try {
     const note = await api('/api/study/notes?page_path=' + encodeURIComponent(path));
-    input.value = note.content || '';
-    storageSet(noteKey(path), input.value);
-    document.getElementById('notes-status').textContent = note.updated_at ? `已从本地学习库恢复，更新于 ${note.updated_at}。` : '可记录理解、疑问或项目联想。';
+    if (input.value === initialValue) {
+      input.value = note.content || '';
+      storageSet(noteKey(path), input.value);
+      document.getElementById('notes-status').textContent = note.updated_at ? `已从本地学习库恢复，更新于 ${note.updated_at}。` : '可记录理解、疑问或项目联想。';
+    }
   } catch (e) {
-    document.getElementById('notes-status').textContent = '学习库暂不可用，当前内容仅保存在浏览器。';
+    if (input.value === initialValue) document.getElementById('notes-status').textContent = '学习库暂不可用，当前内容仅保存在浏览器。';
   }
   setTimeout(() => input.focus(), 0);
 }
@@ -3431,7 +3434,14 @@ async function importLearningFile(file) {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ payload }),
     });
     const incoming = preview.incoming;
-    const message = `将合并 ${incoming.sessions} 个会话、${incoming.notes} 条笔记、${incoming.reflections || 0} 条心得、${incoming.cards} 张复习卡和 ${incoming.learning_focus || 0} 个学习重点。已有其他重点时，备份中的断点保留到心得。确认导入吗？`;
+      const lab = preview.learning_lab || { incoming: {}, conflicts: {} };
+      const labRows = lab.incoming || {};
+      const conflicts = Object.values(lab.conflicts || {}).reduce((sum, count) => sum + Number(count || 0), 0);
+      const labSummary = (labRows.progress || labRows.attempts || labRows.rewards)
+        ? `实验室草稿 ${labRows.progress || 0} 条、导入标记的运行记录 ${labRows.attempts || 0} 条、XP 记录 ${labRows.rewards || 0} 条。`
+        : '';
+      const conflictSummary = conflicts ? `发现 ${conflicts} 条实验室冲突，导入时保留本机记录。` : '';
+      const message = `将合并 ${incoming.sessions} 个会话、${incoming.notes} 条笔记、${incoming.reflections || 0} 条心得、${incoming.cards} 张复习卡和 ${incoming.learning_focus || 0} 个学习重点。${labSummary}${conflictSummary}已有其他重点时，备份中的断点保留到心得。确认导入吗？`;
     if (!window.confirm(message)) { hint.textContent = '已取消导入。'; return; }
     const result = await api('/api/study/import', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ payload }),
