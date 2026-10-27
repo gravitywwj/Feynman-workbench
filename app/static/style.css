@@ -113,6 +113,9 @@ button { cursor: pointer; }
 .page-panel { grid-area: page; }
 .right-rail { grid-area: rail; }
 .concept-panel { min-height: calc(100vh - 168px); display: flex; flex-direction: column; padding: 20px; }
+@media (min-width: 821px) {
+  body:not(.home-mode) .concept-panel { position: sticky; top: 18px; align-self: start; min-height: 0; height: calc(100dvh - 168px); }
+}
 .search-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
 #search-input { width: 100%; margin: 17px 0 13px; padding: 11px 13px; border: 1px solid var(--line-strong); border-radius: 8px; color: var(--ink); background: #fffdf8; outline: none; font-family: "Microsoft YaHei", sans-serif; font-size: 13px; }
 #search-input:focus { border-color: var(--sage); box-shadow: 0 0 0 3px rgba(115, 133, 93, .11); }
